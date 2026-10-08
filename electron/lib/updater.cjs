@@ -48,7 +48,18 @@ function getUpdateSession(useSystemProxy) {
   return updateSession
 }
 
-/** Prefix proxies, tried in order. First success wins. */
+/**
+ * Prefix proxies, tried in order.
+ *
+ * Only entries verified to actually proxy api.github.com belong here. Measured
+ * on a mainland network: all four serve correct public release data, so they are
+ * kept in order of observed reliability. The `direct` entry stays last as a
+ * fallback for networks that can reach GitHub unaided.
+ *
+ * Note: these mirrors replace the Authorization header with their own account,
+ * so they are usable for READS ONLY. Publishing a Release cannot go through
+ * them — see .github/workflows/release.yml.
+ */
 const MIRROR_PRESETS = [
   { id: 'ghproxy', name: 'gh-proxy.com', prefix: 'https://gh-proxy.com/', note: '长期稳定，推荐' },
   { id: 'ghfast', name: 'ghfast.top', prefix: 'https://ghfast.top/', note: '备用线路' },

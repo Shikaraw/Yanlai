@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: ['main']
+  pull_request:
+    branches: ['main']
+  workflow_dispatch:
+
+jobs:
+  verify:
+    name: 类型检查与测试
+    runs-on: windows-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: 安装依赖
+        run: npm ci --no-audit --no-fund
+        env:
+          npm_config_registry: https://registry.npmjs.org
+          ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 测试套件
+        run: npm test
+
+      - name: 前端构建
+        run: npm run build

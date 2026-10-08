@@ -512,4 +512,13 @@ if (nowMs >= fireAt && nowMs - fireAt < 90000 && !this.fired.has(gk)) { ... }
 
 ---
 
+## 发布为何走 GitHub Actions
+
+本机无法直连 `api.github.com`，而公共镜像会**替换 Authorization 头**
+（实测：发送任意 token，`/user` 返回的都是镜像自己的账号），
+因此无法在本机创建 Release。发布改由 GitHub Actions 在 GitHub 的机器上执行，
+使用自动注入的 `GITHUB_TOKEN`。详见 [RELEASING.md](RELEASING.md)。
+
+---
+
 [← 返回 README](../README.md)

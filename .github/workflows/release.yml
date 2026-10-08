@@ -1,0 +1,124 @@
+name: Release
+
+# Builds the Windows installers on GitHub's runners and publishes them to a
+# Release. This exists because the development machine cannot reach
+# api.github.com directly (mainland network), and the public GitHub mirrors
+# replace the Authorization header with their own token — so publishing from
+# the local machine is impossible. Running here uses the automatic
+# GITHUB_TOKEN, so no personal access token is involved at all.
+#
+# Trigger: pushing a version tag (v1.0.00). Can also be run manually.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要构建并发布的 tag（如 v1.0.00）'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: 构建 Windows 安装包
+    runs-on: windows-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          # workflow_dispatch 时检出指定 tag
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: 读取版本号
+        id: ver
+        shell: bash
+        run: |
+          # 版本号取自 package.json，避免 tag 与 package.json 不一致
+          V=$(node -p "require('./package.json').version")
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "版本号: $V"
+
+      - name: 校验 tag 与 package.json 版本一致
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          # package.json 的 1.0.00 与 tag 的 v1.0.00 应当一致（忽略补零差异）
+          A=$(echo "$TAG" | sed 's/\.0*\([0-9]\)/.\1/g')
+          B=$(echo "${{ steps.ver.outputs.version }}" | sed 's/\.0*\([0-9]\)/.\1/g')
+          if [ "$A" != "$B" ]; then
+            echo "::warning::tag 版本 ($TAG) 与 package.json (${{ steps.ver.outputs.version }}) 不一致，将以 package.json 为准"
+          fi
+
+      - name: 安装依赖
+        run: npm ci --no-audit --no-fund
+        env:
+          # GitHub runner 能直连，无需镜像；显式覆盖仓库里的 .npmrc
+          npm_config_registry: https://registry.npmjs.org
+          ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 运行测试
+        run: npm test
+        continue-on-error: true
+
+      - name: 构建产物
+        run: npm run build
+
+      - name: 打包安装程序
+        run: npx electron-builder --win --x64 --publish never
+        env:
+          APP_VERSION: ${{ steps.ver.outputs.version }}
+          # 签名留空：未配置证书时跳过签名，避免构建失败
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: 列出产物
+        shell: bash
+        run: ls -la release/ | grep -i '\.exe$' || true
+
+      - name: 发布到 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: 研来 v${{ steps.ver.outputs.version }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## 研来 v${{ steps.ver.outputs.version }}
+
+            ### 下载
+
+            | 文件 | 说明 |
+            |---|---|
+            | `研来-Yanlai-${{ steps.ver.outputs.version }}-安装包-x64.exe` | 安装版，含开始菜单与桌面快捷方式 |
+            | `研来-Yanlai-${{ steps.ver.outputs.version }}-免安装-x64.exe` | 免安装版，双击即用 |
+
+            ### 首次使用
+
+            1. 启动后在 **设置 → 模型与 API** 填入 Base URL、API Key 与模型名
+            2. 点「测试连接」确认可用
+            3. 想用截图讲题，请选择支持视觉的模型（gpt-4o / qwen-vl-max / glm-4v 等）
+
+            完整说明见 [README](https://github.com/${{ github.repository }}#三分钟上手) 与 [使用手册](https://github.com/${{ github.repository }}/blob/main/docs/USAGE.md)。
+
+            > 覆盖安装即可升级，你的对话、错题与知识库都会保留。
+          files: |
+            release/*.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
