@@ -1,13 +1,22 @@
 name: Release
 
 # Builds the Windows installers on GitHub's runners and publishes them to a
-# Release. This exists because the development machine cannot reach
-# api.github.com directly (mainland network), and the public GitHub mirrors
-# replace the Authorization header with their own token — so publishing from
-# the local machine is impossible. Running here uses the automatic
-# GITHUB_TOKEN, so no personal access token is involved at all.
+# Release.
 #
-# Trigger: pushing a version tag (v1.0.00). Can also be run manually.
+# Why this runs here instead of on the maintainer's machine:
+#   1. The development machine cannot reach api.github.com at all (mainland
+#      network, and the local proxy's upstream node is down).
+#   2. The public GitHub mirrors that DO work replace the Authorization header
+#      with their own account token — verified by sending a bogus token and
+#      getting the mirror's own login back. So authenticated writes are
+#      impossible through them.
+# Running on a GitHub runner uses the automatic GITHUB_TOKEN; no personal access
+# token is involved.
+#
+# Asset filenames are intentionally ASCII (Yanlai-1.0.00-Setup-x64.exe).
+# Verified: GitHub's "update a release asset" endpoint returns 404 for
+# non-ASCII filenames, which aborted the first publish attempt. The app maps
+# these names to Chinese labels for display.
 
 on:
   push:
@@ -24,7 +33,7 @@ permissions:
 
 jobs:
   build-windows:
-    name: 构建 Windows 安装包
+    name: 构建并发布 Windows 安装包
     runs-on: windows-latest
     timeout-minutes: 40
 
@@ -32,7 +41,6 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
         with:
-          # workflow_dispatch 时检出指定 tag
           ref: ${{ github.event.inputs.tag || github.ref }}
           fetch-depth: 0
 
@@ -46,79 +54,109 @@ jobs:
         id: ver
         shell: bash
         run: |
-          # 版本号取自 package.json，避免 tag 与 package.json 不一致
           V=$(node -p "require('./package.json').version")
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "版本号: $V"
 
-      - name: 校验 tag 与 package.json 版本一致
+      - name: 校验 tag 与 package.json 版本
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
           TAG="${GITHUB_REF#refs/tags/v}"
-          # package.json 的 1.0.00 与 tag 的 v1.0.00 应当一致（忽略补零差异）
           A=$(echo "$TAG" | sed 's/\.0*\([0-9]\)/.\1/g')
           B=$(echo "${{ steps.ver.outputs.version }}" | sed 's/\.0*\([0-9]\)/.\1/g')
           if [ "$A" != "$B" ]; then
-            echo "::warning::tag 版本 ($TAG) 与 package.json (${{ steps.ver.outputs.version }}) 不一致，将以 package.json 为准"
+            echo "::warning::tag ($TAG) 与 package.json (${{ steps.ver.outputs.version }}) 不一致，以 package.json 为准"
           fi
 
       - name: 安装依赖
         run: npm ci --no-audit --no-fund
         env:
-          # GitHub runner 能直连，无需镜像；显式覆盖仓库里的 .npmrc
+          # runner 可直连，覆盖仓库 .npmrc 里的国内镜像
           npm_config_registry: https://registry.npmjs.org
           ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
 
       - name: 类型检查
         run: npm run typecheck
 
-      - name: 运行测试
+      - name: 测试
         run: npm test
-        continue-on-error: true
 
-      - name: 构建产物
+      - name: 构建前端
         run: npm run build
 
       - name: 打包安装程序
         run: npx electron-builder --win --x64 --publish never
         env:
           APP_VERSION: ${{ steps.ver.outputs.version }}
-          # 签名留空：未配置证书时跳过签名，避免构建失败
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
-      - name: 列出产物
+      - name: 确认产物
         shell: bash
-        run: ls -la release/ | grep -i '\.exe$' || true
+        run: |
+          ls -la release/ | grep -i '\.exe$'
+          COUNT=$(ls release/*.exe 2>/dev/null | wc -l)
+          if [ "$COUNT" -lt 1 ]; then
+            echo "::error::没有找到任何 .exe 产物"
+            exit 1
+          fi
 
-      - name: 发布到 Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          name: 研来 v${{ steps.ver.outputs.version }}
-          draft: false
-          prerelease: false
-          generate_release_notes: true
-          body: |
-            ## 研来 v${{ steps.ver.outputs.version }}
-
-            ### 下载
-
-            | 文件 | 说明 |
-            |---|---|
-            | `研来-Yanlai-${{ steps.ver.outputs.version }}-安装包-x64.exe` | 安装版，含开始菜单与桌面快捷方式 |
-            | `研来-Yanlai-${{ steps.ver.outputs.version }}-免安装-x64.exe` | 免安装版，双击即用 |
-
-            ### 首次使用
-
-            1. 启动后在 **设置 → 模型与 API** 填入 Base URL、API Key 与模型名
-            2. 点「测试连接」确认可用
-            3. 想用截图讲题，请选择支持视觉的模型（gpt-4o / qwen-vl-max / glm-4v 等）
-
-            完整说明见 [README](https://github.com/${{ github.repository }}#三分钟上手) 与 [使用手册](https://github.com/${{ github.repository }}/blob/main/docs/USAGE.md)。
-
-            > 覆盖安装即可升级，你的对话、错题与知识库都会保留。
-          files: |
-            release/*.exe
+      # gh CLI is preinstalled on GitHub runners and handles asset upload far
+      # more robustly than the third-party release action (which failed on the
+      # second asset during the first attempt).
+      - name: 创建 Release 并上传
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          V="${{ steps.ver.outputs.version }}"
+          NOTES=$(cat <<EOF
+          ## 研来 v${V}
+
+          ### 下载
+
+          | 文件 | 说明 |
+          |---|---|
+          | \`Yanlai-${V}-Setup-x64.exe\` | **安装版** —— 带开始菜单与桌面快捷方式，可选择安装目录 |
+          | \`Yanlai-${V}-Portable-x64.exe\` | **免安装版** —— 双击即用，不写注册表 |
+
+          > 覆盖安装即可升级；你的对话、错题、知识与卡片都会保留。
+
+          ### 首次使用
+
+          1. 启动后进入 **设置 → 模型与 API**，填入 Base URL、API Key 与模型名
+          2. 点「测试连接」确认可用
+          3. 想用截图讲题，请选择支持视觉的模型（gpt-4o / qwen-vl-max / glm-4v 等）
+
+          想完全免费可装 [Ollama](https://ollama.com)，Base URL 填 \`http://127.0.0.1:11434/v1\`，Key 留空即可。
+
+          详见 [使用手册](https://github.com/${{ github.repository }}/blob/main/docs/USAGE.md)。
+          EOF
+          )
+
+          # 若已存在同名 Release（例如重跑），先删除再重建，保证资产完整
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，先删除以保证资产完整"
+            gh release delete "$TAG" --repo "${{ github.repository }}" --yes
+          fi
+
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            --title "研来 v${V}" \
+            --notes "$NOTES" \
+            --verify-tag \
+            release/Yanlai-"${V}"-Setup-x64.exe \
+            release/Yanlai-"${V}"-Portable-x64.exe
+
+          echo "已发布 Release $TAG"
+
+      - name: 校验 Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          gh release view "$TAG" --repo "${{ github.repository }}" --json tagName,name,assets \
+            --template '{{.tagName}} | {{.name}}{{"\n"}}{{range .assets}}  asset: {{.name}} ({{.size}} bytes){{"\n"}}{{end}}'

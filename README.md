@@ -54,7 +54,7 @@
 
 ### 安装
 
-下载 `研来-Yanlai-1.0.00-安装包-x64.exe` 运行安装，或直接用免安装版 `研来-Yanlai-1.0.00-免安装-x64.exe`。
+下载 `Yanlai-1.0.00-Setup-x64.exe` 运行安装，或直接用免安装版 `Yanlai-1.0.00-Portable-x64.exe`。
 
 ### 配置模型（必做）
 
@@ -459,8 +459,12 @@ npm run dist
 ```
 
 产物在 `release/`：
-- `研来-Yanlai-<版本>-安装包-x64.exe`（NSIS 安装版）
-- `研来-Yanlai-<版本>-免安装-x64.exe`（portable）
+- `Yanlai-<版本>-Setup-x64.exe`（NSIS 安装版）
+- `Yanlai-<版本>-Portable-x64.exe`（portable 免安装版）
+
+> 产物文件名刻意使用 **ASCII**：GitHub 的 Release 资产 API 对非 ASCII 文件名
+> 会在更新资产时返回 404（已实测，曾导致发布中断）。应用内会把这些名字映射成
+> 「安装版 / 免安装版」等中文标签显示。
 
 > 打包需从 GitHub 拉取 NSIS 工具链。若网络不通，脚本已默认使用 npmmirror 镜像，
 > 可通过环境变量 `ELECTRON_BUILDER_BINARIES_MIRROR` 覆盖。

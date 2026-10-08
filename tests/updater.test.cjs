@@ -52,7 +52,11 @@ app.whenReady().then(() => {
   ok('direct preset has empty prefix', u.MIRROR_PRESETS.find((m) => m.id === 'direct').prefix === '')
   ok('exactly one direct entry', u.MIRROR_PRESETS.filter((m) => m.id === 'direct').length === 1)
 
-  console.log('\n== live check (network, may fail offline) ==')
+  // The network result is environment-dependent and must never fail the suite:
+  // a CI runner outside China reaches a different mirror set, and an offline
+  // machine reaches nothing. We assert the *shape* of the result, which is what
+  // the app actually depends on.
+  console.log('\n== live check (环境相关：只校验返回结构) ==')
   u.checkForUpdate({ update: { source: 'mirror', mirrorId: 'ghproxy' } }, '1.0.00', { timeout: 15000 })
     .then((res) => {
       if (res.ok) {
@@ -61,10 +65,22 @@ app.whenReady().then(() => {
         console.log(`    assets=${res.assets.length}${res.assets.length ? ` (${res.assets.map((a) => `${a.name} ${(a.size / 1048576).toFixed(1)}MB`).join(', ')})` : ''}`)
         if (res.assets[0]) console.log(`    mirrorUrl=${res.assets[0].mirrorUrl}`)
       } else {
-        console.log(`  ⚠ 未连通 (${res.reason}): ${res.message}`)
-        console.log(`    尝试记录: ${JSON.stringify(res.attempts)}`)
-        console.log('    （离线或仓库无 Release 时属预期，不计为失败）')
+        console.log(`  ○ 未连通 (${res.reason}): ${res.message}`)
+        console.log('    （离线 / 仓库无 Release / 镜像不可达时属预期，不计为失败）')
       }
+
+      // structural contract — must hold whether or not the network worked
+      ok('result reports currentVersion', res.currentVersion === '1.0.00', String(res.currentVersion))
+      ok('result reports the repo slug', res.repo === 'Shikaraw/Yanlai', String(res.repo))
+      ok('result has a boolean ok flag', typeof res.ok === 'boolean')
+      if (res.ok) {
+        ok('success carries a source name', !!res.source, String(res.source))
+        ok('success carries a comparable version', typeof res.latestVersion === 'string')
+        ok('success carries a boolean hasUpdate', typeof res.hasUpdate === 'boolean')
+      } else {
+        ok('failure explains itself', !!res.message && !!res.reason, JSON.stringify(res))
+      }
+
       console.log(failed ? `\n✗ ${failed} failed` : '\n✓ all updater logic checks passed')
       app.exit(failed ? 1 : 0)
     })

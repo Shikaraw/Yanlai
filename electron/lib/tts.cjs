@@ -73,24 +73,64 @@ async function listVoices() {
   }
 }
 
+/** Does the text contain CJK characters (i.e. needs a Chinese-capable voice)? */
+function hasCJK(text) {
+  return /[\u3400-\u9fff\u3040-\u30ff\uf900-\ufaff]/.test(String(text || ''))
+}
+
+/**
+ * Choose a voice that can actually pronounce the text.
+ *
+ * SAPI does not error when a voice cannot read the script — it just produces an
+ * EMPTY wav (measured: 46 bytes, header only) and the user hears nothing. The
+ * most common trigger is an English-only voice reading Chinese.
+ *
+ * So: when the text needs CJK and the configured voice is missing or not
+ * Chinese, silently substitute an installed Chinese voice. Respect an explicit
+ * Chinese voice; never override a voice that already matches the script.
+ */
+async function pickVoiceForText(text, requestedVoice) {
+  const voices = await listVoices()
+  if (!voices.length) return { voice: requestedVoice || '', substituted: false, voices }
+
+  const requested = voices.find((v) => v.name === requestedVoice)
+  const needCJK = hasCJK(text)
+  const isCJKVoice = (v) => /^zh|chinese|中文|huihui|xiaoxiao|yaoyao|kangkang/i.test(`${v.lang || ''} ${v.name || ''}`)
+
+  if (!needCJK) return { voice: requestedVoice || '', substituted: false, voices }
+  // an explicitly chosen Chinese voice is exactly what we want
+  if (requested && isCJKVoice(requested)) return { voice: requested.name, substituted: false, voices }
+
+  const zh = voices.find(isCJKVoice)
+  if (zh) return { voice: zh.name, substituted: !!requestedVoice, voices, fallbackVoice: zh.name }
+  // no Chinese voice installed — keep the request, but the caller will notice
+  // the empty output and surface a clear message
+  return { voice: requestedVoice || '', substituted: false, voices, noCJKVoice: true }
+}
+
 /** Render one text chunk to a wav file, resolving with its path. */
-function synthesizeWav(text, opts = {}) {
+async function synthesizeWav(text, opts = {}) {
+  if (!isWin) throw new Error('System TTS is only available on Windows')
+  const content = String(text || '')
+  const picked = await pickVoiceForText(content, opts.voice || '')
+  const voice = picked.voice
+
+  const id = crypto.randomBytes(6).toString('hex')
+  const txtFile = path.join(dirs().sounds, `say-${id}.txt`)
+  const wavFile = path.join(dirs().sounds, `say-${id}.wav`)
+  try {
+    fs.mkdirSync(dirs().sounds, { recursive: true })
+    fs.writeFileSync(txtFile, content, 'utf8')
+  } catch (e) {
+    throw e
+  }
+
   return new Promise((resolve, reject) => {
-    if (!isWin) return reject(new Error('System TTS is only available on Windows'))
-    const id = crypto.randomBytes(6).toString('hex')
-    const txtFile = path.join(dirs().sounds, `say-${id}.txt`)
-    const wavFile = path.join(dirs().sounds, `say-${id}.wav`)
-    try {
-      fs.mkdirSync(dirs().sounds, { recursive: true })
-      fs.writeFileSync(txtFile, String(text || ''), 'utf8')
-    } catch (e) {
-      return reject(e)
-    }
     const env = {
       ...process.env,
       YANLAI_TEXT_FILE: txtFile,
       YANLAI_WAV_FILE: wavFile,
-      YANLAI_VOICE: opts.voice || '',
+      YANLAI_VOICE: voice || '',
       YANLAI_RATE: String(toSapiRate(opts.rate)),
       YANLAI_VOLUME: String(Math.round(Math.max(0, Math.min(1, opts.volume ?? 1)) * 100)),
     }
@@ -105,8 +145,34 @@ function synthesizeWav(text, opts = {}) {
       try {
         fs.unlinkSync(txtFile)
       } catch {}
-      if (fs.existsSync(wavFile)) resolve(wavFile)
-      else reject(new Error(err || 'TTS synthesis failed'))
+
+      if (!fs.existsSync(wavFile)) return reject(new Error(err || '语音合成失败'))
+
+      // A header-only WAV means the voice produced no audio. SAPI reports no
+      // error for this, so we must detect it ourselves or the user just gets
+      // silence with no explanation.
+      let size = 0
+      try {
+        size = fs.statSync(wavFile).size
+      } catch {}
+      if (size < 1024) {
+        try {
+          fs.unlinkSync(wavFile)
+        } catch {}
+        if (picked.noCJKVoice) {
+          return reject(
+            new Error(
+              '系统未安装中文语音包，无法朗读中文内容。请在 Windows「设置 → 时间和语言 → 语音 → 管理语音」中安装中文语音（如 Microsoft Huihui），或改用自定义 TTS API 引擎。',
+            ),
+          )
+        }
+        return reject(
+          new Error(
+            `所选语音「${voice || '系统默认'}」无法朗读这段文本（合成结果为空）。请在设置 → 朗读中换一个音色。`,
+          ),
+        )
+      }
+      resolve(wavFile)
     })
   })
 }
@@ -135,4 +201,4 @@ function speakNative(text, opts = {}) {
 
 let theChild = null
 
-module.exports = { listVoices, synthesizeWav, cleanupWav, speakNative, toSapiRate, isWin }
+module.exports = { listVoices, synthesizeWav, cleanupWav, speakNative, toSapiRate, isWin, hasCJK, pickVoiceForText }

@@ -174,7 +174,14 @@ class SpeechEngine {
     let url = this.cache.get(cacheKey)
     if (!url) {
       const r = await bridge.tts.synth({ text, voice: cfg.voice, rate: cfg.rate, volume: cfg.volume })
-      if (!r?.ok) throw new Error(r?.error || '系统朗读失败')
+      if (!r?.ok) {
+        // Surface the reason instead of failing silently — the most common case
+        // is "no Chinese voice installed", where SAPI reports no error at all
+        // and the user would otherwise just hear nothing.
+        this.emit({ error: r?.error || '系统朗读失败' })
+        if (this.onError) this.onError(r?.error || '系统朗读失败')
+        throw new Error(r?.error || '系统朗读失败')
+      }
       const bytes = Uint8Array.from(atob(r.base64), (c) => c.charCodeAt(0))
       const blob = new Blob([bytes], { type: r.mime || 'audio/wav' })
       url = URL.createObjectURL(blob)
@@ -182,6 +189,9 @@ class SpeechEngine {
     }
     await this.playUrl(url, cfg)
   }
+
+  /** Optional hook so the UI can toast TTS failures (set by the app shell). */
+  onError: ((msg: string) => void) | null = null
 
   private remember(key: string, url: string) {
     this.cache.set(key, url)

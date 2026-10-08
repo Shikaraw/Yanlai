@@ -113,8 +113,12 @@ curl -s "https://gh-proxy.com/https://api.github.com/repos/Shikaraw/Yanlai/relea
 
 | 文件 | 说明 |
 |---|---|
-| `研来-Yanlai-<版本>-安装包-x64.exe` | NSIS 安装版 |
-| `研来-Yanlai-<版本>-免安装-x64.exe` | portable 免安装版 |
+| `Yanlai-<版本>-Setup-x64.exe` | NSIS 安装版 |
+| `Yanlai-<版本>-Portable-x64.exe` | portable 免安装版 |
+
+**文件名必须是 ASCII。** 实测发现 GitHub 的「更新 Release 资产」接口对非 ASCII
+文件名返回 404，首次发布时正因此在第二个资产上中断（Release 被回滚）。
+应用内通过 `assetLabel()` 把 ASCII 名字映射成「安装版 / 免安装版」显示给用户。
 
 **注意**：两个 target **必须**有不同的 `artifactName`。
 早期版本忽略这点，导致 portable 静默覆盖了安装包（见 ARCHITECTURE.md）。
@@ -164,9 +168,13 @@ A：`package-lock.json` 与 `package.json` 不同步。本地执行 `npm install
 A：GitHub runner 能直连，一般不会。若确实遇到，可在 workflow 里加
 `ELECTRON_BUILDER_BINARIES_MIRROR` 环境变量。
 
-**Q：Release 里没有 exe**
-A：检查 workflow 的 `files:` 路径是否匹配 `release/*.exe`，
-以及打包步骤是否因签名失败而中断（已设 `CSC_IDENTITY_AUTO_DISCOVERY: 'false'` 跳过签名）。
+**Q：发布步骤报 404 且 Release 被回滚**
+A：几乎总是**非 ASCII 资产文件名**导致。改用 `Yanlai-<版本>-Setup-x64.exe` 这类
+纯 ASCII 名称。发布脚本用的是 `gh release create`（runner 预装），
+它比第三方 release action 更能稳妥处理多资产上传。
+
+**Q：想重跑发布**
+A：脚本会先删除同名 Release 再重建，保证资产完整。直接重跑 workflow 即可。
 
 **Q：想发布 macOS / Linux 版本**
 A：在 `release.yml` 里加对应 job（`macos-latest` / `ubuntu-latest`），

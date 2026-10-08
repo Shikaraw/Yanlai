@@ -81,7 +81,7 @@
         }
       ],
       "icon": "build/icon.ico",
-      "artifactName": "研来-Yanlai-${env.APP_VERSION}-${arch}.${ext}"
+      "artifactName": "Yanlai-${env.APP_VERSION}-${arch}.${ext}"
     },
     "nsis": {
       "oneClick": false,
@@ -91,7 +91,7 @@
       "createStartMenuShortcut": true,
       "shortcutName": "研来",
       "deleteAppDataOnUninstall": false,
-      "artifactName": "研来-Yanlai-${env.APP_VERSION}-安装包-${arch}.${ext}"
+      "artifactName": "Yanlai-${env.APP_VERSION}-Setup-${arch}.${ext}"
     },
     "mac": {
       "target": [
@@ -109,7 +109,7 @@
       "icon": "build/icon.png"
     },
     "portable": {
-      "artifactName": "研来-Yanlai-${env.APP_VERSION}-免安装-${arch}.${ext}"
+      "artifactName": "Yanlai-${env.APP_VERSION}-Portable-${arch}.${ext}"
     }
   }
 }

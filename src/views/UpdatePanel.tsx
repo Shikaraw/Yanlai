@@ -95,8 +95,9 @@ export function UpdatePrompt() {
                   <Icon.download size={16} />
                 </div>
                 <div className="grow" style={{ minWidth: 0 }}>
-                  <div className="kb-name">{a.name}</div>
+                  <div className="kb-name">{assetLabel(a.name)}</div>
                   <div className="kb-meta">
+                    <span className="mono">{a.name}</span>
                     <span>{fmtBytes(a.size)}</span>
                     {a.downloadCount ? <span>已下载 {a.downloadCount} 次</span> : null}
                   </div>
@@ -148,6 +149,24 @@ export function UpdatePrompt() {
       </div>
     </Modal>
   )
+}
+
+/**
+ * Map an asset filename to a Chinese label.
+ *
+ * Release assets use ASCII filenames because GitHub's asset API rejects
+ * non-ASCII names on update (verified: 404 on update-a-release-asset with a
+ * Chinese filename). Users should still see what each file is, so label here.
+ */
+export function assetLabel(name: string, fallback = '文件') {
+  const n = String(name || '')
+  if (/Setup/i.test(n)) return '安装版'
+  if (/Portable/i.test(n)) return '免安装版'
+  if (/\.exe$/i.test(n)) return 'Windows 程序'
+  if (/\.dmg$/i.test(n)) return 'macOS 程序'
+  if (/\.AppImage$/i.test(n)) return 'Linux 程序'
+  if (/\.deb$/i.test(n)) return 'Debian 包'
+  return fallback
 }
 
 /** Prefer the full installer, then any .exe, then whatever exists. */
@@ -308,7 +327,8 @@ export function UpdatePanel() {
                 <div className="row between" key={a.name} style={{ gap: 10, padding: '7px 0' }}>
                   <span className="row center" style={{ gap: 8, minWidth: 0 }}>
                     <Icon.file size={14} />
-                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.name}</span>
+                    <span style={{ fontWeight: 570 }}>{assetLabel(a.name)}</span>
+                    <span className="mono muted" style={{ fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.name}</span>
                     <span className="muted" style={{ fontSize: 11.5, flex: '0 0 auto' }}>{fmtBytes(a.size)}</span>
                   </span>
                   <span className="row" style={{ gap: 6, flex: '0 0 auto' }}>
@@ -489,7 +509,7 @@ export function UpdatePanel() {
                     {r.assets.map((a) => (
                       <button key={a.name} className="chip" style={{ cursor: 'pointer' }} onClick={() => bridge.update.openRelease({ url: a.mirrorUrl })} title="通过镜像下载">
                         <Icon.download size={11} />
-                        {a.name} · {fmtBytes(a.size)}
+                        {assetLabel(a.name)} · {fmtBytes(a.size)}
                       </button>
                     ))}
                   </div>

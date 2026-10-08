@@ -15,6 +15,7 @@ import { SettingsView } from './views/SettingsView'
 import { PreviewPanel, type PreviewTarget } from './views/PreviewPanel'
 import { UpdatePrompt } from './views/UpdatePanel'
 import { bridge, isElectron } from './lib/bridge'
+import { speech } from './lib/tts'
 import { clsx, relativeTime } from './lib/util'
 import type { Artifact } from './lib/types'
 
@@ -34,6 +35,18 @@ export function App() {
   const chat = useChat()
   const [preview, setPreview] = useState<PreviewTarget | null>(null)
   const [booted, setBooted] = useState(false)
+
+  /* ---------------- TTS failure surfaced as a toast ---------------- */
+  useEffect(() => {
+    // Without this, a missing Chinese voice pack results in silence and no
+    // explanation (SAPI reports no error for unpronounceable text).
+    speech.onError = (msg) => {
+      useApp.getState().toast({ kind: 'warn', title: '朗读失败', body: msg, ttl: 9000 })
+    }
+    return () => {
+      speech.onError = null
+    }
+  }, [])
 
   /* ---------------- boot ---------------- */
   useEffect(() => {
