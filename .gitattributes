@@ -1,0 +1,23 @@
+# Normalise line endings so the repo behaves the same on every platform.
+* text=auto eol=lf
+
+# Windows-only tooling should keep CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Shell scripts must be LF, or they fail on Windows with "bad interpreter"
+*.sh text eol=lf
+
+# Binary assets — never touch these
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.ttf binary
+*.woff binary
+*.woff2 binary
+*.exe binary
+
+# Keep diffs readable for generated / lock files
+package-lock.json -diff linguist-generated
+dist/ -diff linguist-generated

@@ -1,0 +1,37 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+release/
+tests/.build/
+.tmp-test/
+.tmp/
+
+# generated icons (regenerate with `npm run icon`)
+build/icon-16.png
+build/icon-24.png
+build/icon-32.png
+build/icon-48.png
+build/icon-64.png
+build/icon-128.png
+build/icon-256.png
+build/icon-1024.png
+build/icon-preview.jpg
+
+# logs & OS cruft
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# editor
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+
+# local env
+.env
+.env.local

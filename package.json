@@ -1,0 +1,115 @@
+{
+  "name": "yanlai",
+  "productName": "研来",
+  "version": "1.0.00",
+  "description": "研来 (Yanlai) — 面向考研的学习辅导 AI Agent 桌面应用",
+  "main": "electron/main.cjs",
+  "author": "Yanlai",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k \"npm:dev:vite\" \"npm:dev:electron\"",
+    "dev:vite": "vite",
+    "dev:electron": "wait-on tcp:5273 && cross-env NODE_ENV=development electron .",
+    "build": "vite build",
+    "start": "npm run build && electron .",
+    "dist": "node scripts/dist.mjs",
+    "version:bump": "node scripts/bump-version.mjs",
+    "icon": "npx electron scripts/make-icons.mjs",
+    "test": "node tests/run.mjs",
+    "typecheck": "tsc --noEmit",
+    "mock": "node scripts/mock-server.mjs"
+  },
+  "dependencies": {
+    "docx": "^9.5.1",
+    "highlight.js": "^11.11.1",
+    "katex": "^0.16.25",
+    "mammoth": "^1.11.0",
+    "mathjs": "^14.9.0",
+    "pdfjs-dist": "^4.10.38",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-markdown": "^10.1.0",
+    "rehype-highlight": "^7.0.2",
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
+    "xlsx": "^0.18.5",
+    "zustand": "^5.0.8"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "@vitejs/plugin-react": "^5.1.0",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "^38.4.0",
+    "electron-builder": "^26.0.12",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.2",
+    "wait-on": "^9.0.1"
+  },
+  "build": {
+    "appId": "com.yanlai.app",
+    "productName": "研来",
+    "copyright": "Copyright © 2026 研来 Yanlai",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "build/icon.png",
+      "build/tray.png",
+      "build/icon.ico",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "artifactName": "研来-Yanlai-${env.APP_VERSION}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "研来",
+      "deleteAppDataOnUninstall": false,
+      "artifactName": "研来-Yanlai-${env.APP_VERSION}-安装包-${arch}.${ext}"
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.education",
+      "icon": "build/icon.png"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Education",
+      "icon": "build/icon.png"
+    },
+    "portable": {
+      "artifactName": "研来-Yanlai-${env.APP_VERSION}-免安装-${arch}.${ext}"
+    }
+  }
+}
