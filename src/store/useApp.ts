@@ -85,6 +85,14 @@ export const useApp = create<AppState>((set, get) => ({
       set({ ready: true, sidebarCollapsed: !!collapsed, rightPanel: right !== false })
       bridge.app.onReady?.(() => {})
       bridge.win.onMaximizeChange?.(() => {})
+      // the main process can change settings on its own — e.g. the first-close
+      // dialog's "remember my choice" — so mirror those writes back into state
+      bridge.settings.onChange?.((next: any) => {
+        if (next) {
+          set({ settings: next })
+          applyTheme(next)
+        }
+      })
     } catch (e) {
       set({ ready: true })
       get().toast({ kind: 'error', title: '初始化失败', body: String((e as Error)?.message || e) })

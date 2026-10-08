@@ -47,6 +47,60 @@ export function KnowledgeView() {
     }
   }
 
+  const doImportFolder = async () => {
+    const dir = await bridge.dialog.openFolder({ title: '导入整个文件夹（含子文件夹）' })
+    if (!dir) return
+    app.toast({ kind: 'info', title: '正在扫描文件夹…', body: dir })
+    const res = await data.importFolder(dir, { subject: importSubject || undefined })
+    if (res.ok) {
+      app.toast({
+        kind: 'success',
+        title: `已导入 ${res.ok} 份资料`,
+        body: res.failed.length ? `${res.failed.length} 份未成功：${res.failed.slice(0, 2).join('；')}` : '已建立检索索引，提问时会自动引用。',
+      })
+    } else {
+      app.toast({ kind: 'error', title: '导入失败', body: res.failed.join('；') || '该文件夹里没有可导入的资料。' })
+    }
+  }
+
+  const onDropFiles = async (e: React.DragEvent) => {
+    e.preventDefault()
+    const files = Array.from(e.dataTransfer?.files || [])
+    const paths = files.map((f) => bridge.fs.pathForFile(f)).filter((p): p is string => !!p)
+    if (!paths.length) {
+      app.toast({ kind: 'warn', title: '无法读取拖入的文件', body: '请改用「导入资料」按钮选择文件。' })
+      return
+    }
+    // a dropped folder yields a path but no extension; hand it to the folder importer
+    const dirs: string[] = []
+    const plain: string[] = []
+    for (const p of paths) {
+      if (/\.[a-z0-9]{1,6}$/i.test(p)) plain.push(p)
+      else dirs.push(p)
+    }
+    let ok = 0
+    const failed: string[] = []
+    for (const d of dirs) {
+      const r = await data.importFolder(d, { subject: importSubject || undefined })
+      ok += r.ok
+      failed.push(...r.failed)
+    }
+    if (plain.length) {
+      const r = await data.importFromPaths(plain, { subject: importSubject || undefined })
+      ok += r.ok
+      failed.push(...r.failed)
+    }
+    if (ok) {
+      app.toast({
+        kind: 'success',
+        title: `已导入 ${ok} 份资料`,
+        body: failed.length ? `${failed.length} 份未成功：${failed.slice(0, 2).join('；')}` : '已建立检索索引。',
+      })
+    } else {
+      app.toast({ kind: 'error', title: '导入失败', body: failed.slice(0, 3).join('；') || '未识别到可导入的资料。' })
+    }
+  }
+
   return (
     <>
       <div className="panel-head">
@@ -76,6 +130,10 @@ export function KnowledgeView() {
             </option>
           ))}
         </select>
+        <button className="btn sm" onClick={doImportFolder} title="选择一个文件夹，递归导入其中所有资料">
+          <Icon.folder size={14} />
+          导入文件夹
+        </button>
         <button className="btn sm primary" onClick={doImport}>
           <Icon.upload size={14} />
           导入资料
@@ -102,11 +160,11 @@ export function KnowledgeView() {
 
         {tab === 'docs' ? (
           <>
-            <div className="dropzone" style={{ marginBottom: 16 }} onClick={doImport} onDragOver={(e) => e.preventDefault()}>
+            <div className="dropzone" style={{ marginBottom: 16 }} onClick={doImport} onDragOver={(e) => e.preventDefault()} onDrop={onDropFiles}>
               <Icon.upload size={26} />
-              <div style={{ marginTop: 9, fontWeight: 600, fontSize: 14 }}>拖入或点击选择资料</div>
+              <div style={{ marginTop: 9, fontWeight: 600, fontSize: 14 }}>拖入文件/文件夹，或点击选择</div>
               <div style={{ fontSize: 12.5, marginTop: 5, lineHeight: 1.6 }}>
-                支持 PDF、Word、Excel、Markdown、TXT、CSV 与题目截图
+                支持 PDF、Word、Excel、Markdown、TXT、CSV 与题目截图；拖入文件夹会递归导入其中全部资料
                 <br />
                 资料仅保存在本机，检索在本地完成，不会上传到任何服务器
               </div>

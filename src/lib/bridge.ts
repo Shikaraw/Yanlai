@@ -27,6 +27,7 @@ export interface YanlaiBridge {
     get(): Promise<any>
     set(patch: any): Promise<any>
     reset(): Promise<any>
+    onChange(cb: (s: any) => void): () => void
   }
   dialog: {
     openFiles(o?: any): Promise<string[]>
@@ -46,6 +47,7 @@ export interface YanlaiBridge {
     listDir(d: string): Promise<Array<{ name: string; path: string; isDir: boolean; size: number; mtime: number }>>
     mkdir(d: string): Promise<{ ok: boolean; file?: string; error?: string }>
     reveal(f: string): Promise<boolean>
+    pathForFile(file: File): string | null
   }
   shell: { openPath(f: string): Promise<{ ok: boolean; error?: string }>; openExternal(u: string): Promise<boolean> }
   clipboard: { readText(): Promise<string>; writeText(t: string): Promise<boolean> }
@@ -60,6 +62,9 @@ export interface YanlaiBridge {
     loadChunks(docId: string): Promise<any>
     delete(docId: string): Promise<boolean>
     copySource(src: string, docId: string): Promise<string | null>
+    takeCliImport(): Promise<{ dir: string; subject?: string; exit?: boolean; replace?: boolean } | null>
+    cliImportDone(): Promise<boolean>
+    purgeFiles(): Promise<boolean>
   }
   planner: {
     getSchedule(): Promise<any>
@@ -215,6 +220,7 @@ function makeMock(): YanlaiBridge {
         persistSettings()
         return settings
       },
+      onChange: () => () => {},
     },
     dialog: {
       openFiles: async () => [],
@@ -246,6 +252,7 @@ function makeMock(): YanlaiBridge {
       listDir: async () => [],
       mkdir: async (d) => ({ ok: true, file: d }),
       reveal: async () => false,
+      pathForFile: () => null,
     },
     shell: {
       openPath: async () => ({ ok: false, error: '仅在桌面应用内可用' }),
@@ -288,6 +295,9 @@ function makeMock(): YanlaiBridge {
         return true
       },
       copySource: async () => null,
+      takeCliImport: async () => null,
+      cliImportDone: async () => true,
+      purgeFiles: async () => true,
     },
     planner: {
       getSchedule: async () => store.planner,

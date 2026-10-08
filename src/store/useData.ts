@@ -58,6 +58,7 @@ export interface DataState {
 
   /* knowledge base */
   importFromPaths: (paths: string[], opts?: { subject?: string; tags?: string[] }) => Promise<{ ok: number; failed: string[] }>
+  importFolder: (dir: string, opts?: { subject?: string; tags?: string[]; recursive?: boolean }) => Promise<{ ok: number; failed: string[] }>
   importText: (name: string, text: string, opts?: { subject?: string; tags?: string[]; type?: KnowledgeDoc['type'] }) => Promise<KnowledgeDoc>
   deleteKbDoc: (id: string) => Promise<void>
   updateKbDoc: (id: string, patch: Partial<KnowledgeDoc>) => Promise<void>
@@ -373,6 +374,12 @@ export const useData = create<DataState>((set, get) => ({
     return { ok, failed }
   },
 
+  async importFolder(dir, opts = {}) {
+    const files = await collectImportable(dir, bridge.fs.listDir, opts.recursive !== false)
+    if (!files.length) return { ok: 0, failed: [`${dir} 中没有可导入的资料文件`] }
+    return get().importFromPaths(files, { subject: opts.subject, tags: opts.tags })
+  },
+
   async importText(name, text, opts = {}) {
     const doc = makeDoc({
       name,
@@ -479,3 +486,47 @@ export const useData = create<DataState>((set, get) => ({
 }))
 
 export { REASON_CATEGORIES }
+
+/* ------------------------------------------------------------------ */
+/* folder import helper                                                */
+/* ------------------------------------------------------------------ */
+
+const IMPORTABLE_EXT = new Set([
+  'pdf', 'docx', 'doc', 'txt', 'md', 'markdown', 'xlsx', 'xls', 'xlsm',
+  'csv', 'json', 'tex', 'png', 'jpg', 'jpeg', 'webp', 'bmp',
+])
+
+const SKIP_DIR = /^(node_modules|\.git|\.svn|__pycache__|\$RECYCLE\.BIN)$/i
+
+/**
+ * Walk a folder and return the importable file paths.
+ *
+ * Uses the main-process `fs.listDir` bridge rather than the File System Access
+ * API so directory picking works identically to single-file import. Depth-first
+ * so a chapter folder's own subfolders (knowledge/techniques/errors) come along.
+ */
+async function collectImportable(
+  dir: string,
+  listDir: (d: string) => Promise<Array<{ name: string; path: string; isDir: boolean }>>,
+  recursive: boolean,
+): Promise<string[]> {
+  const out: string[] = []
+  const walk = async (d: string, depth: number) => {
+    let rows: Array<{ name: string; path: string; isDir: boolean }> = []
+    try {
+      rows = (await listDir(d)) || []
+    } catch {
+      return
+    }
+    for (const r of rows) {
+      if (r.isDir) {
+        if (recursive && depth < 8 && !SKIP_DIR.test(r.name)) await walk(r.path, depth + 1)
+        continue
+      }
+      const ext = (r.name.split('.').pop() || '').toLowerCase()
+      if (IMPORTABLE_EXT.has(ext)) out.push(r.path)
+    }
+  }
+  await walk(dir, 0)
+  return out.sort((a, b) => a.localeCompare(b, 'zh'))
+}

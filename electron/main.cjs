@@ -25,6 +25,30 @@ let reminderWindow = null
 let planner = null
 let quitting = false
 let trayActions = null
+// true while the first-close dialog is on screen, so a second close event does
+// not stack another dialog
+let closePromptOpen = false
+
+/* ---------------- CLI: bulk knowledge-base import ----------------
+ * `yanlai --import-kb <dir> [--subject 数学] [--import-kb-exit]`
+ * lets a large folder be ingested without clicking through the UI, and makes
+ * seeding a fresh install scriptable.
+ * ---------------------------------------------------------------- */
+function parseCliImport() {
+  const argv = process.argv.slice(1)
+  const out = { dir: '', subject: '', exit: argv.includes('--import-kb-exit'), replace: argv.includes('--import-kb-replace') }
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]
+    if (a === '--import-kb') out.dir = argv[i + 1] || ''
+    else if (a.startsWith('--import-kb=')) out.dir = a.slice('--import-kb='.length)
+    else if (a === '--subject') out.subject = argv[i + 1] || ''
+    else if (a.startsWith('--subject=')) out.subject = a.slice('--subject='.length)
+  }
+  if (out.dir && !path.isAbsolute(out.dir)) out.dir = path.resolve(process.cwd(), out.dir)
+  return out.dir ? out : null
+}
+const cliImport = parseCliImport()
+let cliImportPending = cliImport
 
 /* ---------------- single instance (防多开) ---------------- */
 const gotLock = app.requestSingleInstanceLock()
@@ -82,6 +106,18 @@ function applyLoginItem(enabled) {
   } catch {}
 }
 
+/** Hide to the tray, keeping the process (and the reminder scheduler) alive. */
+function hideToTray() {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  mainWindow.hide()
+  if (!global.__yanlaiTrayHintShown) {
+    global.__yanlaiTrayHintShown = true
+    try {
+      new Notification({ title: '研来仍在后台运行', body: '已最小化到系统托盘，点击托盘图标可重新打开。' }).show()
+    } catch {}
+  }
+}
+
 /* ---------------- main window ---------------- */
 function createMainWindow() {
   const s = settingsLib.loadSettings()
@@ -119,17 +155,55 @@ function createMainWindow() {
   })
 
   mainWindow.on('close', (e) => {
+    if (quitting) return
     const st = settingsLib.loadSettings()
-    if (!quitting && st.ui.minimizeToTray) {
+    // closeAction is the source of truth. When it is unset (existing installs
+    // that predate this setting) default to asking, so the behaviour is
+    // explained once instead of silently quitting or hiding.
+    const action = st.ui.closeAction || 'ask'
+
+    if (action === 'tray') {
       e.preventDefault()
-      mainWindow.hide()
-      if (!global.__yanlaiTrayHintShown) {
-        global.__yanlaiTrayHintShown = true
-        try {
-          new Notification({ title: '研来仍在后台运行', body: '已最小化到系统托盘，点击托盘图标可重新打开。' }).show()
-        } catch {}
-      }
+      hideToTray()
+      return
     }
+    if (action === 'quit') {
+      doQuit()
+      return
+    }
+
+    // action === 'ask': resolve asynchronously. The button index and the
+    // checkbox state are only both available from the async variant, and the
+    // window must be kept alive until the user answers.
+    e.preventDefault()
+    if (closePromptOpen) return
+    closePromptOpen = true
+    dialog
+      .showMessageBox(mainWindow, {
+        type: 'question',
+        title: '关闭研来',
+        message: '要退出研来，还是最小化到系统托盘？',
+        detail: '最小化到托盘后研来仍在后台运行，时间提醒会照常弹出。选择「退出研来」才会完全结束程序。',
+        buttons: ['最小化到托盘', '退出研来', '取消'],
+        defaultId: 0,
+        cancelId: 2,
+        noLink: true,
+        checkboxLabel: '记住我的选择，下次不再询问',
+        checkboxChecked: false,
+      })
+      .then(({ response, checkboxChecked }) => {
+        closePromptOpen = false
+        if (response === 2) return // 取消：窗口保持打开
+        const target = response === 1 ? 'quit' : 'tray'
+        // keep minimizeToTray in sync: window-all-closed still consults it
+        if (checkboxChecked) settingsLib.saveSettings({ ui: { closeAction: target, minimizeToTray: target !== 'quit' } })
+        send('settings:changed', settingsLib.loadSettings())
+        if (target === 'quit') doQuit()
+        else hideToTray()
+      })
+      .catch(() => {
+        closePromptOpen = false
+      })
   })
 
   mainWindow.on('closed', () => {
@@ -601,7 +675,7 @@ ipcMain.handle('kb:delete', (_e, docId) => {
   } catch {}
   return true
 })
-ipcMain.handle('kb:copySource', (_e, { src, docId }) => {
+ipcMain.handle('kb:copySource', async (_e, { src, docId }) => {
   try {
     const dest = path.join(store.dirs().kb, `src-${docId}${path.extname(src)}`)
     fs.copyFileSync(src, dest)
@@ -609,6 +683,30 @@ ipcMain.handle('kb:copySource', (_e, { src, docId }) => {
   } catch {
     return null
   }
+})
+ipcMain.handle('kb:purgeFiles', () => {
+  // Removes every stored chunk file and source copy. The caller is responsible
+  // for having already cleared the matching IndexedDB records (`clearKb`).
+  try {
+    const kbDir = store.dirs().kb
+    for (const n of fs.readdirSync(kbDir)) {
+      try { fs.unlinkSync(path.join(kbDir, n)) } catch {}
+    }
+    return true
+  } catch {
+    return false
+  }
+})
+ipcMain.handle('kb:cliImportTake', () => {
+  // pulled by the renderer once it has booted; `did-finish-load` fires long
+  // before React subscribes, so a push would be dropped
+  const p = cliImportPending
+  cliImportPending = null
+  return p
+})
+ipcMain.handle('kb:cliImportDone', () => {
+  if (cliImport && cliImport.exit) doQuit()
+  return true
 })
 
 /* ---------------- IPC: notifications ---------------- */

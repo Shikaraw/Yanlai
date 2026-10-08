@@ -87,6 +87,10 @@ const DEFAULT_SETTINGS = {
     showTimestamps: false,
     confirmExit: true,
     minimizeToTray: true,
+    // What the window close button does: 'ask' | 'tray' | 'quit'.
+    // 'ask' is the default so the very first close explains the tray behaviour
+    // and lets the user opt out of further prompts.
+    closeAction: 'ask',
     startMinimized: false,
     autoLaunch: false,
   },

@@ -1,7 +1,7 @@
 {
   "name": "yanlai",
   "productName": "研来",
-  "version": "1.0.00",
+  "version": "1.0.01",
   "description": "研来 (Yanlai) — 面向考研的学习辅导 AI Agent 桌面应用",
   "main": "electron/main.cjs",
   "author": "Yanlai",

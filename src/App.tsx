@@ -116,6 +116,36 @@ export function App() {
     return unsub
   }, [])
 
+  /* ---------------- CLI bulk KB import (--import-kb) ---------------- */
+  useEffect(() => {
+    if (!booted) return
+    let cancelled = false
+    void (async () => {
+      const job = await bridge.kb.takeCliImport().catch(() => null)
+      if (!job || cancelled) return
+      if (job.replace) {
+        // scoped to the knowledge base only: chats and the wrong-answer book stay
+        await data.clearKb()
+        await bridge.kb.purgeFiles().catch(() => {})
+      }
+      const res = await data.importFolder(job.dir, { subject: job.subject || undefined })
+      useApp.getState().toast({
+        kind: res.ok ? 'success' : 'error',
+        title: res.ok ? `已导入 ${res.ok} 份资料` : '批量导入失败',
+        body: res.failed.length ? `${res.failed.length} 份未成功：${res.failed.slice(0, 2).join('；')}` : '已建立检索索引。',
+        ttl: 12000,
+      })
+      if (job.exit) {
+        // let the toast + IndexedDB write land, then quit. `win.close()` would
+        // only hide to the tray (minimizeToTray defaults to true).
+        setTimeout(() => bridge.kb.cliImportDone(), 1800)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [booted])
+
   /* ---------------- keyboard shortcuts ---------------- */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

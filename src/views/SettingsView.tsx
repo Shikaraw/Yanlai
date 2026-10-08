@@ -865,6 +865,7 @@ function PlannerTab() {
   const p = app.settings.planner
   const save = (patch: any) => app.patchSettings({ planner: patch }, { silent: true })
   const [status, setStatus] = useState<any>(null)
+  const closeAction = (app.settings.ui?.closeAction || 'ask') as 'ask' | 'tray' | 'quit'
 
   useEffect(() => {
     void bridge.planner.status().then(setStatus)
@@ -922,10 +923,20 @@ function PlannerTab() {
       </SettingRow>
 
       <SettingRow
-        title="最小化到系统托盘"
-        desc="关闭窗口时保留后台运行，时间提醒与托盘图标继续工作。关闭此项后点关闭按钮将直接退出。"
+        title="关闭窗口时"
+        desc="点窗口关闭按钮的行为。选「每次询问」时，若在弹窗里勾选「记住我的选择」即变为对应选项；随时可在这里改回。"
       >
-        <Switch checked={app.settings.ui?.minimizeToTray !== false} onChange={(v) => app.patchSettings({ ui: { minimizeToTray: v } }, { silent: true })} />
+        <Segmented
+          value={closeAction}
+          onChange={(v) => {
+            void app.patchSettings({ ui: { closeAction: v, minimizeToTray: v !== 'quit' } }, { silent: true })
+          }}
+          options={[
+            { value: 'ask', label: '每次询问' },
+            { value: 'tray', label: '最小化到托盘' },
+            { value: 'quit', label: '直接退出' },
+          ]}
+        />
       </SettingRow>
 
       <SettingRow title="开机自动启动" desc="登录系统后自动在后台运行，确保提醒不遗漏。">

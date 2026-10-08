@@ -1,5 +1,5 @@
 'use strict'
-const { contextBridge, ipcRenderer } = require('electron')
+const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
 const invoke = (channel, payload) => ipcRenderer.invoke(channel, payload)
 
@@ -49,6 +49,15 @@ contextBridge.exposeInMainWorld('yanlai', {
     listDir: (d) => invoke('fs:listDir', d),
     mkdir: (d) => invoke('fs:mkdir', d),
     reveal: (f) => invoke('fs:reveal', f),
+    // File.path was removed in Electron 32; this is the supported replacement
+    // for turning a dropped File into a real filesystem path.
+    pathForFile: (file) => {
+      try {
+        return webUtils.getPathForFile(file) || null
+      } catch {
+        return null
+      }
+    },
   },
   shell: {
     openPath: (f) => invoke('shell:openPath', f),
@@ -80,6 +89,9 @@ contextBridge.exposeInMainWorld('yanlai', {
     loadChunks: (docId) => invoke('kb:loadChunks', docId),
     delete: (docId) => invoke('kb:delete', docId),
     copySource: (src, docId) => invoke('kb:copySource', { src, docId }),
+    takeCliImport: () => invoke('kb:cliImportTake'),
+    cliImportDone: () => invoke('kb:cliImportDone'),
+    purgeFiles: () => invoke('kb:purgeFiles'),
   },
   planner: {
     getSchedule: () => invoke('planner:getSchedule'),
