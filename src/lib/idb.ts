@@ -50,8 +50,11 @@ async function tx<T>(store: StoreName, mode: IDBTransactionMode, fn: (os: IDBObj
   return new Promise<T>((resolve, reject) => {
     const t = db.transaction(store, mode)
     const req = fn(t.objectStore(store))
-    req.onsuccess = () => resolve(req.result as T)
+    let result: T
+    req.onsuccess = () => { result = req.result as T }
+    t.oncomplete = () => resolve(result)
     req.onerror = () => reject(req.error)
+    t.onerror = () => reject(t.error)
     t.onabort = () => reject(t.error)
   })
 }

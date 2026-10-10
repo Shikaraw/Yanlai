@@ -8,7 +8,23 @@
  * of pretending to succeed.
  */
 
+import type { FocusWindowState } from './focus'
+
+export type CalculatorMode = 'calculus' | 'matrix' | 'ode'
+export interface CalculatorRequest { id: string; mode: CalculatorMode; expression: string; conditions?: string[] }
+export interface CalculatorResult { text: string; latex: string | null; kind?: string; isMatrix?: boolean; matrixText?: string; label?: string }
+export type CalculatorResponse = { id: string | null; ok: true; result: CalculatorResult }
+  | { id: string | null; ok: false; error: { code: string; message: string } }
+export interface CalculatorStatus { ready: boolean; state: 'ready' | 'starting' | 'stopped'; error?: string }
+
 export interface YanlaiBridge {
+  calculator: {
+    status(): Promise<CalculatorStatus>
+    ready(): Promise<CalculatorStatus>
+    calculate(request: CalculatorRequest): Promise<CalculatorResponse>
+    cancel(id: string): Promise<boolean>
+    restart(): Promise<CalculatorStatus>
+  }
   app: {
     info(): Promise<any>
     setLoginItem(v: boolean): Promise<boolean>
@@ -22,6 +38,8 @@ export interface YanlaiBridge {
     hide(): Promise<void>
     setAlwaysOnTop(v: boolean): Promise<boolean>
     onMaximizeChange(cb: (v: boolean) => void): () => void
+    getFocusState(): Promise<FocusWindowState | null>
+    onFocusState(cb: (state: FocusWindowState) => void): () => void
   }
   settings: {
     get(): Promise<any>
@@ -69,6 +87,10 @@ export interface YanlaiBridge {
   planner: {
     getSchedule(): Promise<any>
     setSchedule(d: any): Promise<any>
+    listPlans(): Promise<any>
+    savePlan(p: any): Promise<any>
+    activatePlan(id: string): Promise<any>
+    deletePlan(id: string): Promise<any>
     status(): Promise<any>
     pause(v: boolean): Promise<boolean>
     preview(dayOffset: number): Promise<any>
@@ -191,9 +213,26 @@ function makeMock(): YanlaiBridge {
     chunks: {} as Record<string, any>,
     planner: JSON.parse(localStorage.getItem('yanlai.planner.mock') || 'null'),
   }
+  let planLibrary = JSON.parse(localStorage.getItem('yanlai.plans.mock') || 'null') || { version: 1, activeId: '', plans: [] }
+  if (!planLibrary.plans.length && store.planner) {
+    const id = crypto.randomUUID()
+    store.planner = { ...store.planner, planId: id, name: store.planner.name || '默认计划' }
+    planLibrary = { version: 1, activeId: id, plans: [{ id, name: store.planner.name, schedule: store.planner, createdAt: Date.now(), updatedAt: Date.now() }] }
+  }
+  const persistPlans = () => {
+    localStorage.setItem('yanlai.plans.mock', JSON.stringify(planLibrary))
+    localStorage.setItem('yanlai.planner.mock', JSON.stringify(store.planner))
+  }
   const persistSettings = () => localStorage.setItem(LS_SETTINGS, JSON.stringify(settings))
 
   return {
+    calculator: {
+      status: async () => ({ ready: false, state: 'stopped', error: '符号计算需要桌面应用和 Python/SymPy。' }),
+      ready: async () => ({ ready: false, state: 'stopped', error: '符号计算需要桌面应用和 Python/SymPy。' }),
+      restart: async () => ({ ready: false, state: 'stopped', error: '符号计算需要桌面应用和 Python/SymPy。' }),
+      calculate: async request => ({ id: request.id, ok: false, error: { code: 'UNAVAILABLE', message: '浏览器预览不执行 Python，请使用桌面应用。' } }),
+      cancel: async () => false,
+    },
     app: {
       info: async () => ({ version: '1.0.00', name: '研来', platform: 'browser', arch: 'n/a', electron: '-', chrome: navigator.userAgent, node: '-', userData: base, isDev: true, mock: true }),
       setLoginItem: async () => false,
@@ -207,6 +246,8 @@ function makeMock(): YanlaiBridge {
       hide: async () => {},
       setAlwaysOnTop: async (v) => v,
       onMaximizeChange: noopUnsub,
+      getFocusState: async () => null, // No desktop observation in browser preview.
+      onFocusState: noopUnsub,
     },
     settings: {
       get: async () => settings,
@@ -302,9 +343,45 @@ function makeMock(): YanlaiBridge {
     planner: {
       getSchedule: async () => store.planner,
       setSchedule: async (d) => {
-        store.planner = { ...d, updatedAt: Date.now() }
-        localStorage.setItem('yanlai.planner.mock', JSON.stringify(store.planner))
-        return store.planner
+        const id = planLibrary.activeId || crypto.randomUUID()
+        store.planner = { ...d, planId: id, name: d.name || '默认计划', updatedAt: Date.now() }
+        const index = planLibrary.plans.findIndex((p: any) => p.id === id)
+        const plan = { id, name: store.planner.name, schedule: store.planner, createdAt: index < 0 ? Date.now() : planLibrary.plans[index].createdAt, updatedAt: Date.now() }
+        if (index < 0) planLibrary.plans.push(plan)
+        else planLibrary.plans[index] = plan
+        planLibrary.activeId = id
+        persistPlans()
+        return { ok: true, schedule: structuredClone(store.planner), library: structuredClone(planLibrary) }
+      },
+      listPlans: async () => structuredClone(planLibrary),
+      savePlan: async ({ id, name, schedule }) => {
+        const index = planLibrary.plans.findIndex((p: any) => p.id === id)
+        if (id && index < 0) return { ok: false, error: '计划不存在' }
+        const plan = { id: id || crypto.randomUUID(), name: String(name || '未命名计划').trim() || '未命名计划', schedule: structuredClone(schedule), createdAt: index < 0 ? Date.now() : planLibrary.plans[index].createdAt, updatedAt: Date.now() }
+        plan.schedule = { ...plan.schedule, name: plan.name, planId: plan.id, updatedAt: plan.updatedAt }
+        if (index < 0) planLibrary.plans.push(plan)
+        else planLibrary.plans[index] = plan
+        if (planLibrary.activeId === plan.id) store.planner = plan.schedule
+        persistPlans()
+        return { ok: true, plan: structuredClone(plan), library: structuredClone(planLibrary) }
+      },
+      activatePlan: async (id) => {
+        const plan = planLibrary.plans.find((p: any) => p.id === id)
+        if (!plan) return { ok: false, error: '计划不存在' }
+        planLibrary.activeId = id
+        store.planner = structuredClone(plan.schedule)
+        persistPlans()
+        return { ok: true, schedule: structuredClone(store.planner), library: structuredClone(planLibrary) }
+      },
+      deletePlan: async (id) => {
+        if (planLibrary.plans.length <= 1) return { ok: false, error: '至少保留一个计划' }
+        planLibrary.plans = planLibrary.plans.filter((p: any) => p.id !== id)
+        if (planLibrary.activeId === id) {
+          planLibrary.activeId = planLibrary.plans[0].id
+          store.planner = structuredClone(planLibrary.plans[0].schedule)
+        }
+        persistPlans()
+        return { ok: true, schedule: structuredClone(store.planner), library: structuredClone(planLibrary) }
       },
       status: async () => ({ paused: false, mode: store.planner?.mode || 'unified', hasSchedule: !!store.planner, now: 0, current: null, next: null, count: 0, progress: 0 }),
       pause: async (v) => v,

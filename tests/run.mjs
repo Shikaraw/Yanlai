@@ -16,8 +16,8 @@ import { createRequire } from 'node:module'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const buildDir = path.join(root, 'tests', '.build')
-const suites = ['math.plot.test.mjs', 'kb.context.test.mjs']
-const libs = ['mathplot', 'kb', 'context', 'util']
+const suites = ['math.plot.test.mjs', 'kb.context.test.mjs', 'focus.test.mjs', 'planner.test.mjs', 'calculator-input.test.mjs']
+const libs = ['mathplot', 'kb', 'context', 'util', 'focus', 'planner', 'calculator-input']
 
 fs.rmSync(buildDir, { recursive: true, force: true })
 fs.mkdirSync(buildDir, { recursive: true })
@@ -45,6 +45,16 @@ for (const suite of suites) {
   console.log(`\n──────── ${suite} ────────`)
   try {
     execFileSync(process.execPath, [path.join(buildDir, suite)], { stdio: 'inherit', cwd: buildDir })
+  } catch {
+    failed++
+  }
+}
+
+// Pure CommonJS scheduler suite runs directly against the main-process library.
+for (const suite of ['planner-scheduler.test.cjs', 'plan-library.test.cjs', 'calculator.test.cjs']) {
+  console.log(`\n──────── ${suite} ────────`)
+  try {
+    execFileSync(process.execPath, [path.join(root, 'tests', suite)], { stdio: 'inherit', cwd: root })
   } catch {
     failed++
   }

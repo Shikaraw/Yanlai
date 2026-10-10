@@ -18,6 +18,9 @@
 *.woff2 binary
 *.exe binary
 
+# Runtime files are SHA-256 pinned; checkout must preserve their exact bytes.
+resources/clever-calculator/** -text
+
 # Keep diffs readable for generated / lock files
 package-lock.json -diff linguist-generated
 dist/ -diff linguist-generated

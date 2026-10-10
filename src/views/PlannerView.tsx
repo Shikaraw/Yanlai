@@ -4,6 +4,8 @@ import { Icon } from '../components/Icons'
 import { EmptyState, Field, Modal, Segmented, Switch } from '../components/ui'
 import { bridge } from '../lib/bridge'
 import { clsx, durationLabel, fromMinutes, toMinutes, uid } from '../lib/util'
+import { isStudyKind, itemDuration, resolveScenarioKey, studyMinutes as scheduledStudyMinutes, type PlannerListKey } from '../lib/planner'
+import { CopyDaysModal } from './PlannerCopyModal'
 import type { PlanItem, PlanSchedule } from '../lib/types'
 
 const DAYS = [
@@ -120,9 +122,13 @@ export function PlannerView() {
   const app = useApp()
   const [schedule, setSchedule] = useState<PlanSchedule | null>(null)
   const [loading, setLoading] = useState(true)
-  const [editing, setEditing] = useState<{ day: string; item: PlanItem } | null>(null)
+  const [editing, setEditing] = useState<{ day: string; item: PlanItem; isNew: boolean } | null>(null)
   const [weekDay, setWeekDay] = useState<string>('1')
   const [saving, setSaving] = useState(false)
+  const [planLibrary, setPlanLibrary] = useState<any>(null)
+  const [planName, setPlanName] = useState('默认计划')
+  const [copying, setCopying] = useState<{ day: string; item: PlanItem } | null>(null)
+  const [copyDays, setCopyDays] = useState<string[]>([])
 
   const now = new Date()
   const todayDow = String(now.getDay() === 0 ? 7 : now.getDay())
@@ -133,11 +139,22 @@ export function PlannerView() {
     let cancelled = false
     const load = async () => {
       setLoading(true)
-      const s = (await bridge.planner.getSchedule()) as PlanSchedule | null
-      if (cancelled) return
-      setSchedule(s || emptySchedule())
-      setWeekDay(todayDow)
-      setLoading(false)
+      try {
+        const s = (await bridge.planner.getSchedule()) as PlanSchedule | null
+        const lib = await bridge.planner.listPlans()
+        if (cancelled) return
+        setSchedule(s || emptySchedule())
+        setPlanLibrary(lib)
+        setPlanName(s?.name || lib?.plans?.find((p: any) => p.id === lib.activeId)?.name || '默认计划')
+        setWeekDay(s?.mode === 'workday' ? 'work' : todayDow)
+      } catch (error) {
+        if (!cancelled) {
+          setSchedule(emptySchedule())
+          app.toast({ kind: 'error', title: '计划加载失败', body: String(error) })
+        }
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
     }
     void load()
     const unsub = bridge.planner.onEvent(() => {
@@ -163,13 +180,84 @@ export function PlannerView() {
     return () => clearInterval(t)
   }, [])
 
-  const persist = async (next: PlanSchedule) => {
-    setSchedule(next)
+  const persist = async (next: PlanSchedule): Promise<boolean> => {
     setSaving(true)
     try {
-      await bridge.planner.setSchedule(next)
+      const result = await bridge.planner.setSchedule(next)
+      if (result?.ok === false) throw new Error(result.error || '无法写入计划文件。')
+      const saved = result?.schedule || result || next
+      setSchedule(saved)
+      setPlanLibrary(await bridge.planner.listPlans())
       const st = await bridge.planner.status().catch(() => null)
       if (st) app.setPlannerStatus(st)
+      return true
+    } catch (error) {
+      app.toast({ kind: 'error', title: '计划保存失败', body: String(error) })
+      return false
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const activatePlan = async (id: string) => {
+    setSaving(true)
+    try {
+      const result = await bridge.planner.activatePlan(id)
+      if (!result?.ok) throw new Error(result?.error || '无法切换方案')
+      setPlanLibrary(result.library)
+      setSchedule(result.schedule)
+      setPlanName(result.schedule?.name || '未命名计划')
+      setWeekDay(result.schedule?.mode === 'workday' ? 'work' : todayDow)
+      const st = await bridge.planner.status().catch(() => null)
+      if (st) app.setPlannerStatus(st)
+    } catch (error) {
+      app.toast({ kind: 'error', title: '方案切换失败', body: String(error) })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const saveNamedPlan = async (kind: 'save' | 'new' | 'copy') => {
+    if (!schedule || saving) return
+    setSaving(true)
+    try {
+      const name = kind === 'new' ? '新方案' : kind === 'copy' ? `${planName.trim() || '未命名计划'}（另存）` : planName
+      const result = await bridge.planner.savePlan({
+        id: kind === 'save' ? planLibrary?.activeId : undefined,
+        name,
+        schedule: kind === 'new' ? emptySchedule() : schedule,
+      })
+      if (!result?.ok) throw new Error(result?.error || '无法保存方案')
+      setPlanLibrary(result.library)
+      if (kind !== 'save') await activatePlan(result.plan.id)
+      else {
+        setSchedule(result.plan.schedule)
+        setPlanName(result.plan.name)
+      }
+      app.toast({ kind: 'success', title: kind === 'new' ? '已创建空白方案' : kind === 'copy' ? '已另存并选用方案' : '方案已保存', body: '时段编辑会自动保存；原有其他方案不会被覆盖。' })
+    } catch (error) {
+      app.toast({ kind: 'error', title: '方案保存失败', body: String(error) })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const deleteActivePlan = async () => {
+    if (!planLibrary?.activeId || saving) return
+    const choice = await bridge.dialog.message({ type: 'warning', title: '删除方案', message: `删除「${planName}」？`, detail: '该方案的时段将被删除，其他方案与已记录的统计不会受影响。', buttons: ['取消', '删除'], defaultId: 0, cancelId: 0 })
+    if (choice !== 1) return
+    setSaving(true)
+    try {
+      const result = await bridge.planner.deletePlan(planLibrary.activeId)
+      if (!result?.ok) throw new Error(result?.error || '无法删除方案')
+      setPlanLibrary(result.library)
+      const next = result.schedule || await bridge.planner.getSchedule()
+      setSchedule(next || emptySchedule())
+      setPlanName(next?.name || '默认计划')
+      setWeekDay(next?.mode === 'workday' ? 'work' : todayDow)
+      app.toast({ kind: 'success', title: '方案已删除' })
+    } catch (error) {
+      app.toast({ kind: 'error', title: '方案删除失败', body: String(error) })
     } finally {
       setSaving(false)
     }
@@ -180,9 +268,8 @@ export function PlannerView() {
     if (!schedule) return []
     if (schedule.mode === 'weekly') return schedule.weekly?.[key] || []
     if (schedule.mode === 'workday') {
-      const dow = Number(key)
-      const isWork = (schedule.workdays || [1, 2, 3, 4, 5]).includes(dow)
-      return isWork ? schedule.workday?.work || [] : schedule.workday?.rest || []
+      const target = resolveScenarioKey(schedule, key as PlannerListKey)
+      return target === 'work' ? schedule.workday?.work || [] : schedule.workday?.rest || []
     }
     return schedule.unified || []
   }
@@ -190,9 +277,8 @@ export function PlannerView() {
   const setListFor = (next: PlanSchedule, key: string, items: PlanItem[]) => {
     if (next.mode === 'weekly') return { ...next, weekly: { ...next.weekly, [key]: items } }
     if (next.mode === 'workday') {
-      const dow = Number(key)
-      const isWork = (next.workdays || [1, 2, 3, 4, 5]).includes(dow)
-      return isWork ? { ...next, workday: { ...next.workday, work: items } } : { ...next, workday: { ...next.workday, rest: items } }
+      const target = resolveScenarioKey(next, key as PlannerListKey)
+      return target === 'work' ? { ...next, workday: { ...next.workday, work: items } } : { ...next, workday: { ...next.workday, rest: items } }
     }
     return { ...next, unified: items }
   }
@@ -201,25 +287,25 @@ export function PlannerView() {
 
   /* ---------------- template application ---------------- */
   const applyTemplate = async (tpl: (typeof TEMPLATES)[number]) => {
-    if (!schedule) return
+    if (!schedule || saving) return
     const items = tpl.build()
     if (schedule.mode === 'weekly') {
-      // fill weekdays with the template, leave weekends for the student
+      // Give every day independent template items.
       const next = { ...schedule, weekly: { ...schedule.weekly } }
       for (const d of DAYS) next.weekly[String(d.n)] = items.map((i) => ({ ...i, id: uid('pi') }))
-      await persist(next)
+      if (!await persist(next)) return
       app.toast({ kind: 'success', title: `已套用「${tpl.name}」`, body: '已应用到周一至周日，可逐日微调。' })
     } else if (schedule.mode === 'workday') {
-      await persist({
+      if (!await persist({
         ...schedule,
         workday: {
           work: items.map((i) => ({ ...i, id: uid('pi') })),
           rest: tpl.build().map((i) => ({ ...i, id: uid('pi') })),
         },
-      })
+      })) return
       app.toast({ kind: 'success', title: `已套用「${tpl.name}」`, body: '工作日与休息日均已填充。' })
     } else {
-      await persist({ ...schedule, unified: items })
+      if (!await persist({ ...schedule, unified: items })) return
       app.toast({ kind: 'success', title: `已套用「${tpl.name}」`, body: '已设为每日统一作息。' })
     }
   }
@@ -230,30 +316,53 @@ export function PlannerView() {
     const items = listFor(day)
     const exists = items.some((i) => i.id === item.id)
     const nextItems = sorted(exists ? items.map((i) => (i.id === item.id ? item : i)) : [...items, item])
-    await persist(setListFor(schedule, day, nextItems))
-    setEditing(null)
+    if (await persist(setListFor(schedule, day, nextItems))) setEditing(null)
   }
 
   const deleteItem = async (day: string, id: string) => {
     if (!schedule) return
-    await persist(setListFor(schedule, day, listFor(day).filter((i) => i.id !== id)))
-    setEditing(null)
+    if (await persist(setListFor(schedule, day, listFor(day).filter((i) => i.id !== id)))) setEditing(null)
   }
 
   const duplicateItem = async (day: string, item: PlanItem) => {
-    if (!schedule) return
-    const copy = { ...item, id: uid('pi'), title: `${item.title}（副本）` }
-    await persist(setListFor(schedule, day, sorted([...listFor(day), copy])))
+    if (!schedule || saving) return
+    if (schedule.mode === 'unified') {
+      app.toast({ kind: 'info', title: '当前模式不需要跨天复制', body: '每日统一模式共享同一组时段，无需复制。' })
+      return
+    }
+    if (schedule.mode === 'workday') {
+      const target = resolveScenarioKey(schedule, day) === 'work' ? 'rest' : 'work'
+      const copy = { ...item, id: uid('pi') }
+      if (!await persist(setListFor(schedule, target, sorted([...listFor(target), copy])))) return
+      app.toast({ kind: 'success', title: `已复制到${target === 'work' ? '工作日' : '休息日'}`, body: '已生成独立时段，名称保持不变；源场景不受影响。' })
+      return
+    }
+    setCopyDays(DAYS.filter((d) => String(d.n) !== day).map((d) => String(d.n)))
+    setCopying({ day, item: { ...item } })
+  }
+
+  const applyCopy = async () => {
+    if (!schedule || !copying || !copyDays.length) return
+    const weekly = { ...schedule.weekly }
+    for (const day of copyDays) {
+      const copy = { ...copying.item, id: uid('pi') }
+      weekly[day] = sorted([...(weekly[day] || []), copy])
+    }
+    if (!await persist({ ...schedule, weekly })) return
+    setCopying(null)
+    setCopyDays([])
+    app.toast({ kind: 'success', title: `已复制到 ${copyDays.length} 天`, body: '已生成独立时段，不会带入“副本”字样。' })
   }
 
   /* ---------------- overview ---------------- */
   const status = app.plannerStatus
   const plannedToday = useMemo(() => {
     if (!schedule) return []
+    if (schedule.mode === 'unified' && !(schedule.activeDays || [1, 2, 3, 4, 5, 6, 7]).includes(Number(todayDow))) return []
     return sorted(listFor(todayDow))
   }, [schedule, todayDow])
 
-  const studyMinutes = (items: PlanItem[]) => items.filter((i) => ['study', 'review', 'class'].includes(i.kind)).reduce((n, i) => n + Math.max(0, (toMinutes(i.end) ?? 0) - (toMinutes(i.start) ?? 0)), 0)
+  const studyMinutes = (items: PlanItem[]) => scheduledStudyMinutes(items)
 
   if (loading) {
     return (
@@ -269,15 +378,17 @@ export function PlannerView() {
 
   return (
     <>
-      <div className="panel-head">
+      <div className="panel-head" style={{ flexWrap: 'wrap' }}>
         <Icon.calendar size={19} style={{ color: 'var(--accent)' }} />
-        <div className="grow">
+        <div className="grow" style={{ minWidth: 180 }}>
           <h1>时间规划</h1>
           <div className="sub">
-            {modeLabel} · 共 {schedule.mode === 'weekly' ? Object.values(schedule.weekly).reduce((n, v) => n + v.length, 0) : schedule.mode === 'workday' ? schedule.workday.work.length + schedule.workday.rest.length : schedule.unified.length} 个时段
+            {modeLabel} · {planName} · 共 {schedule.mode === 'weekly' ? Object.values(schedule.weekly).reduce((n, v) => n + v.length, 0) : schedule.mode === 'workday' ? schedule.workday.work.length + schedule.workday.rest.length : schedule.unified.length} 个时段
             {saving ? ' · 保存中…' : ''}
           </div>
         </div>
+        <input className="input" style={{ width: 150 }} maxLength={80} value={planName} onChange={(e) => setPlanName(e.target.value)} aria-label="方案名称" title="方案名称，修改后点击保存方案" disabled={saving} />
+        {planLibrary?.plans?.length ? <select className="select" style={{ width: 170, flexShrink: 0 }} aria-label="选用方案" disabled={saving} value={planLibrary.activeId || ''} onChange={(e) => void activatePlan(e.target.value)}><option value="" disabled>选择方案</option>{planLibrary.plans.map((p: any) => <option key={p.id} value={p.id}>{p.name}</option>)}</select> : null}
 
         <button
           className="btn sm"
@@ -306,6 +417,14 @@ export function PlannerView() {
       </div>
 
       <div className="panel-body">
+        <div className="card row wrap" style={{ gap: 8, marginBottom: 16 }}>
+          <span className="chip accent">当前选用：{schedule.name || '未命名计划'}</span>
+          <span className="grow" />
+          <button className="btn sm" disabled={saving} onClick={() => void saveNamedPlan('save')}><Icon.check size={14} />保存方案 / 名称</button>
+          <button className="btn sm" disabled={saving} onClick={() => void saveNamedPlan('new')}><Icon.plus size={14} />新建空白方案</button>
+          <button className="btn sm" disabled={saving} onClick={() => void saveNamedPlan('copy')}><Icon.copy size={14} />另存为</button>
+          <button className="btn sm danger" disabled={saving || (planLibrary?.plans?.length || 0) <= 1} onClick={() => void deleteActivePlan()}><Icon.trash size={14} />删除当前方案</button>
+        </div>
         {/* ---- mode selector ---- */}
         <div className="card" style={{ marginBottom: 16 }}>
           <div className="row wrap between">
@@ -433,7 +552,7 @@ export function PlannerView() {
           <div className="stat-tile">
             <div className="k">今日学习总量</div>
             <div className="v">{(studyMinutes(plannedToday) / 60).toFixed(1)}<span style={{ fontSize: 14, fontWeight: 500 }}> 小时</span></div>
-            <div className="d">不含用餐 / 休息 / 运动</div>
+            <div className="d">仅学习 / 复习；不含上课与其他活动</div>
           </div>
           <div className="stat-tile">
             <div className="k">当前进行中</div>
@@ -480,6 +599,7 @@ export function PlannerView() {
                 setEditing({
                   day: schedule.mode === 'workday' ? (weekDay === 'rest' ? 'rest' : 'work') : weekDay,
                   item: mk('08:00', '09:00', '新时段', 'study'),
+                  isNew: true,
                 })
               }
             >
@@ -521,7 +641,7 @@ export function PlannerView() {
                 : (schedule.activeDays || []).includes(Number(todayDow))
           }
           studyMinutes={studyMinutes(listFor(schedule.mode === 'workday' ? (weekDay === 'rest' ? 'rest' : 'work') : weekDay) || [])}
-          onEdit={(item) => setEditing({ day: schedule.mode === 'workday' ? (weekDay === 'rest' ? 'rest' : 'work') : weekDay, item })}
+          onEdit={(item) => setEditing({ day: schedule.mode === 'workday' ? (weekDay === 'rest' ? 'rest' : 'work') : weekDay, item, isNew: false })}
           onToggle={(item) => {
             const key = schedule.mode === 'workday' ? (weekDay === 'rest' ? 'rest' : 'work') : weekDay
             const items = listFor(key).map((i) => (i.id === item.id ? { ...i, remind: i.remind === false } : i))
@@ -547,23 +667,30 @@ export function PlannerView() {
                       </div>
                     </div>
                     {items.length ? (
-                      items.slice(0, 12).map((it) => (
-                        <div
-                          className="week-mini"
-                          key={it.id}
-                          data-kind={it.kind}
-                          onClick={() => {
-                            setWeekDay(String(d.n))
-                            setEditing({ day: String(d.n), item: it })
-                          }}
-                          title={it.note || `${it.start} - ${it.end}`}
-                        >
-                          <div className="wm-time">{it.start}</div>
-                          <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.title}</div>
+                      <>
+                        <div className="week-mini-list">
+                          {items.map((it) => (
+                            <div
+                              className="week-mini"
+                              key={it.id}
+                              data-kind={it.kind}
+                              onClick={() => {
+                                setWeekDay(String(d.n))
+                                setEditing({ day: String(d.n), item: it, isNew: false })
+                              }}
+                              title={it.note || `${it.start} - ${it.end}`}
+                            >
+                              <div className="wm-time">{it.start}</div>
+                              <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.title}</div>
+                            </div>
+                          ))}
                         </div>
-                      ))
+                        <button className="week-mini week-add" onClick={() => { setWeekDay(String(d.n)); setEditing({ day: String(d.n), item: mk('08:00', '09:00', '新时段', 'study'), isNew: true }) }}>
+                          + 添加
+                        </button>
+                      </>
                     ) : (
-                      <button className="week-mini" onClick={() => { setWeekDay(String(d.n)); setEditing({ day: String(d.n), item: mk('08:00', '09:00', '新时段', 'study') }) }} style={{ borderLeftColor: 'var(--line)', color: 'var(--text-3)' }}>
+                      <button className="week-mini week-add" onClick={() => { setWeekDay(String(d.n)); setEditing({ day: String(d.n), item: mk('08:00', '09:00', '新时段', 'study'), isNew: true }) }} style={{ borderLeftColor: 'var(--line)', color: 'var(--text-3)' }}>
                         + 添加
                       </button>
                     )}
@@ -617,12 +744,24 @@ export function PlannerView() {
         ) : null}
       </div>
 
-      <ItemEditor
-        editing={editing}
-        onClose={() => setEditing(null)}
-        onSave={saveItem}
-        onDelete={deleteItem}
-      />
+        <ItemEditor
+          editing={editing}
+          onClose={() => setEditing(null)}
+          onSave={saveItem}
+          onDelete={deleteItem}
+          onCopy={(item, day) => void duplicateItem(day, item)}
+          copyLabel={schedule.mode === 'workday' ? '复制到另一场景' : '复制到其他天'}
+        />
+        <CopyDaysModal
+          open={!!copying}
+          days={DAYS}
+          selected={copyDays}
+          sourceDay={copying?.day || ''}
+          item={copying?.item || null}
+          onToggle={(day) => setCopyDays((prev) => prev.includes(day) ? prev.filter((x) => x !== day) : [...prev, day])}
+          onClose={() => { setCopying(null); setCopyDays([]) }}
+          onApply={() => void applyCopy()}
+        />
     </>
   )
 }
@@ -679,8 +818,9 @@ function TimelineEditor({
         {items.map((it) => {
           const s = toMinutes(it.start) ?? 0
           const e = toMinutes(it.end)
-          const active = isToday && e !== null && nowMin >= s && nowMin < e
-          const done = isToday && e !== null && nowMin >= e
+          const overnight = e !== null && e < s
+          const active = isToday && e !== null && nowMin >= s && (overnight || nowMin < e)
+          const done = isToday && e !== null && !overnight && nowMin >= e
           return (
             <div className={clsx('tl-item', active && 'active', done && 'done')} key={it.id} data-kind={it.kind}>
               <div className="tl-time">
@@ -702,7 +842,7 @@ function TimelineEditor({
                     {KINDS.find((k) => k.v === it.kind)?.label || it.kind}
                   </span>
                   {active ? <span className="chip accent">进行中</span> : null}
-                  {done ? <span className="chip">已完成</span> : null}
+                  {done ? <span className="chip">已结束</span> : null}
                 </div>
                 <div className="tl-note">
                   {durationLabel(it.start, it.end)}
@@ -717,7 +857,7 @@ function TimelineEditor({
                 >
                   {it.remind === false ? <Icon.bellOff size={14} style={{ color: 'var(--text-3)' }} /> : <Icon.bell size={14} style={{ color: 'var(--accent)' }} />}
                 </button>
-                <button className="btn ghost icon sm" title="复制到其他天" onClick={() => onDuplicate(it)}>
+                <button className="btn ghost icon sm" title={mode === 'workday' ? `复制到${dayKey === 'work' ? '休息日' : '工作日'}` : '复制到其他天'} onClick={() => onDuplicate(it)}>
                   <Icon.copy size={14} />
                 </button>
               </div>
@@ -737,11 +877,15 @@ function ItemEditor({
   onClose,
   onSave,
   onDelete,
+  onCopy,
+  copyLabel,
 }: {
-  editing: { day: string; item: PlanItem } | null
+  editing: { day: string; item: PlanItem; isNew: boolean } | null
   onClose: () => void
   onSave: (day: string, item: PlanItem) => void
   onDelete: (day: string, id: string) => void
+  onCopy: (item: PlanItem, day: string) => void
+  copyLabel: string
 }) {
   const [draft, setDraft] = useState<PlanItem | null>(null)
   useEffect(() => {
@@ -749,7 +893,7 @@ function ItemEditor({
   }, [editing])
 
   if (!editing || !draft) return null
-  const isNew = !editing.item.title || editing.item.title === '新时段'
+  const isNew = editing.isNew
   const valid = !!draft.title.trim() && toMinutes(draft.start) !== null && (toMinutes(draft.end) !== null || !draft.end)
 
   return (
@@ -769,6 +913,10 @@ function ItemEditor({
           <div className="grow" />
           <button className="btn" onClick={onClose}>
             取消
+          </button>
+          <button className="btn" onClick={() => onCopy(draft, editing.day)} disabled={!valid}>
+            <Icon.copy size={15} />
+            {copyLabel}
           </button>
           <button className="btn primary" disabled={!valid} onClick={() => onSave(editing.day, draft)}>
             <Icon.check size={15} />

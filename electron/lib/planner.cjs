@@ -1,52 +1,71 @@
 'use strict'
 
-/* ------------------------------------------------------------------ *
- * Plan scheduler. Runs in the main process so reminders fire even when *
- * the window is hidden in the tray.                                   *
- * ------------------------------------------------------------------ */
-
+/* Plan scheduler: local-calendar occurrences, independent of renderer lifetime. */
 const DAY_LABELS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
 
 function todayKey(d = new Date()) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
 function isoDay(d = new Date()) {
-  const js = d.getDay() // 0=Sun
-  return js === 0 ? 7 : js // 1=Mon..7=Sun
+  return d.getDay() || 7
 }
 
 function toMinutes(hhmm) {
-  const m = /^(\d{1,2}):(\d{2})$/.exec(String(hhmm || '').trim())
+  if (typeof hhmm !== 'string') return null
+  const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm.trim())
   if (!m) return null
-  const h = Number(m[1])
-  const mi = Number(m[2])
-  if (h > 23 || mi > 59) return null
-  return h * 60 + mi
+  const h = Number(m[1]), mi = Number(m[2])
+  return h <= 23 && mi <= 59 ? h * 60 + mi : null
 }
 
 function sortItems(items) {
-  return [...(items || [])].sort((a, b) => (toMinutes(a.start) ?? 1e9) - (toMinutes(b.start) ?? 1e9))
+  if (!Array.isArray(items)) return []
+  return items.filter((it) => isRecord(it) && toMinutes(it.start) !== null &&
+    (it.end === undefined || it.end === null || it.end === '' || toMinutes(it.end) !== null))
+    .sort((a, b) => toMinutes(a.start) - toMinutes(b.start))
 }
 
-/** Resolve which item list applies to a given date, per schedule mode. */
+/** Active days apply to unified mode; weekly/workday lists have their own routing. */
 function resolveDayItems(schedule, date = new Date()) {
-  if (!schedule) return []
-  const mode = schedule.mode || 'unified'
+  if (!isRecord(schedule) || !Number.isFinite(date.getTime())) return []
+  const mode = schedule.mode ?? 'unified'
   const dow = isoDay(date)
-  if (mode === 'weekly') {
-    const list = schedule.weekly?.[dow] || []
-    return sortItems(list)
-  }
+  if (mode === 'weekly') return sortItems(isRecord(schedule.weekly) ? schedule.weekly[dow] : null)
   if (mode === 'workday') {
-    const workdays = schedule.workdays || [1, 2, 3, 4, 5]
-    const isWork = workdays.includes(dow)
-    return sortItems(isWork ? schedule.workday?.work : schedule.workday?.rest)
+    const workdays = schedule.workdays === undefined ? [1, 2, 3, 4, 5] : schedule.workdays
+    if (!Array.isArray(workdays) || !isRecord(schedule.workday)) return []
+    return sortItems(workdays.includes(dow) ? schedule.workday.work : schedule.workday.rest)
   }
-  // unified
-  const active = schedule.activeDays
-  if (Array.isArray(active) && active.length && !active.includes(dow)) return []
+  if (mode !== 'unified') return []
+  if (schedule.activeDays !== undefined &&
+      (!Array.isArray(schedule.activeDays) || !schedule.activeDays.includes(dow))) return []
   return sortItems(schedule.unified)
+}
+
+function offsetDate(date, offset) {
+  const result = new Date(date)
+  result.setDate(result.getDate() + offset)
+  return result
+}
+
+function occurrences(schedule, date) {
+  return resolveDayItems(schedule, date).map((item) => {
+    const startMin = toMinutes(item.start), endMin = toMinutes(item.end)
+    const start = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, startMin)
+    const end = new Date(start)
+    if (endMin !== null) {
+      if (endMin < startMin) end.setDate(end.getDate() + 1)
+      end.setHours(Math.floor(endMin / 60), endMin % 60, 0, 0)
+    }
+    return { item, start: start.getTime(), end: end.getTime(), dateKey: todayKey(date) }
+  })
+}
+
+function previewItem(event, date, now, isToday) {
+  const state = !isToday || now < event.start ? 'pending' : now < event.end ? 'active' : 'done'
+  return { ...event.item, state, dayLabel: DAY_LABELS[isoDay(date) - 1], dow: isoDay(date), dateKey: event.dateKey }
 }
 
 class Planner {
@@ -56,8 +75,8 @@ class Planner {
     this.onFire = onFire || (() => {})
     this.timer = null
     this.status_ = { paused: false }
-    this.fired = new Set() // `${dateKey}:${id}` guard
-    this.snoozed = [] // [{ at: ms, payload }]
+    this.fired = new Set() // JSON [occurrence date, plan identity, event identity]
+    this.snoozed = []
     this.lastPruneKey = null
   }
 
@@ -73,7 +92,7 @@ class Planner {
   }
 
   reload() {
-    this.fired.clear()
+    // Saving or reactivating a plan must not re-fire an already delivered event.
     this.tick()
   }
 
@@ -83,100 +102,77 @@ class Planner {
 
   snooze(minutes, payload) {
     const p = payload || this.lastPayload
-    if (!p) return
-    this.snoozed.push({ at: Date.now() + minutes * 60000, payload: { ...p, kind: 'snooze', title: `${p.title}（稍后提醒）` } })
+    if (typeof minutes !== 'number' || !Number.isFinite(minutes) || minutes <= 0 || !isRecord(p)) return
+    const at = Date.now() + minutes * 60000
+    if (!Number.isFinite(at)) return
+    this.snoozed.push({ at, payload: { ...p, kind: 'snooze', title: `${typeof p.title === 'string' ? p.title : '学习任务'}（稍后提醒）` } })
   }
 
-  /** Events for a given day offset (0 = today). */
+  /** Today's preview contains today's starts; overnight carryover is in status.current. */
   preview(dayOffset = 0) {
-    const s = this.getSchedule()
-    const d = new Date()
-    d.setDate(d.getDate() + dayOffset)
-    const items = resolveDayItems(s, d)
-    const nowMin = d.getHours() * 60 + d.getMinutes()
-    const isToday = dayOffset === 0
-    return items.map((it) => {
-      const start = toMinutes(it.start)
-      const end = toMinutes(it.end)
-      let state = 'pending'
-      if (isToday) {
-        if (end !== null && nowMin >= end) state = 'done'
-        else if (start !== null && nowMin >= start) state = 'active'
-      }
-      return { ...it, state, dayLabel: DAY_LABELS[isoDay(d) - 1], dow: isoDay(d), dateKey: todayKey(d) }
-    })
+    if (!Number.isSafeInteger(dayOffset) || Math.abs(dayOffset) > 36600) return []
+    const now = new Date(), date = offsetDate(now, dayOffset)
+    return occurrences(this.getSchedule(), date).map((event) => previewItem(event, date, now.getTime(), dayOffset === 0))
   }
 
   status() {
-    const s = this.getSchedule()
-    const today = this.preview(0)
-    const nowMin = new Date().getHours() * 60 + new Date().getMinutes()
-    const next = today.find((it) => (toMinutes(it.start) ?? 0) > nowMin) || null
-    const current = today.find((it) => {
-      const a = toMinutes(it.start)
-      const b = toMinutes(it.end)
-      return a !== null && b !== null && nowMin >= a && nowMin < b
-    })
+    const schedule = this.getSchedule(), now = new Date(), nowMs = now.getTime()
+    const events = occurrences(schedule, now)
+    const today = events.map((event) => previewItem(event, now, nowMs, true))
+    const previous = offsetDate(now, -1)
+    // Prefer an active start today over overlapping carryover from yesterday.
+    const current = events.find((event) => nowMs >= event.start && nowMs < event.end) ||
+      occurrences(schedule, previous).find((event) => nowMs >= event.start && nowMs < event.end)
     return {
       paused: this.status_.paused,
-      mode: s?.mode || 'unified',
-      hasSchedule: !!s,
-      now: nowMin,
-      current: current || null,
-      next: next || null,
+      mode: isRecord(schedule) ? schedule.mode || 'unified' : 'unified',
+      hasSchedule: isRecord(schedule),
+      now: now.getHours() * 60 + now.getMinutes(),
+      current: current ? previewItem(current, current.dateKey === todayKey(now) ? now : previous, nowMs, true) : null,
+      next: today.find((it) => toMinutes(it.start) > now.getHours() * 60 + now.getMinutes()) || null,
       count: today.length,
-      progress: today.length ? today.filter((i) => i.state === 'done').length / today.length : 0,
+      progress: today.length ? today.filter((it) => it.state === 'done').length / today.length : 0,
     }
   }
 
   tick() {
-    const now = new Date()
-    const key = todayKey(now)
+    const now = new Date(), nowMs = now.getTime(), key = todayKey(now)
     if (this.lastPruneKey !== key) {
-      this.fired.clear()
+      // Keep yesterday and tomorrow too: advance reminders may fire before midnight.
+      const oldest = todayKey(offsetDate(now, -1))
+      for (const guard of this.fired) if (JSON.parse(guard)[0] < oldest) this.fired.delete(guard)
       this.lastPruneKey = key
     }
 
-    // snoozed reminders fire regardless of pause state
-    if (this.snoozed.length) {
-      const due = this.snoozed.filter((s) => s.at <= Date.now())
-      if (due.length) {
-        this.snoozed = this.snoozed.filter((s) => s.at > Date.now())
-        for (const d of due) this.emit(d.payload)
-      }
-    }
-
+    const due = this.snoozed.filter((s) => s.at <= nowMs)
+    this.snoozed = this.snoozed.filter((s) => s.at > nowMs)
+    for (const reminder of due) this.emit(reminder.payload)
     if (this.status_.paused) return
-    const settings = this.getSettings() || {}
-    const advance = Number(settings?.planner?.advanceSeconds) || 0
-    const items = resolveDayItems(this.getSchedule(), now)
-    if (!items.length) return
 
-    const nowMs = now.getTime()
-    for (let i = 0; i < items.length; i++) {
-      const it = items[i]
-      const mins = toMinutes(it.start)
-      if (mins === null) continue
-      if (it.remind === false) continue
-      const target = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0)
-      target.setMinutes(mins)
-      const fireAt = target.getTime() - advance * 1000
-      const id = it.id || `${it.start}-${it.title}`
-      const gk = `${key}:${id}`
-      // fire only within a 90s window after the target: prevents a flood of
-      // missed reminders when the app was closed or the machine slept.
-      if (nowMs >= fireAt && nowMs - fireAt < 90000 && !this.fired.has(gk)) {
-        this.fired.add(gk)
-        const next = items.slice(i + 1).find((x) => toMinutes(x.start) !== null) || null
+    const settings = this.getSettings() || {}
+    const rawAdvance = settings?.planner?.advanceSeconds
+    const advance = typeof rawAdvance === 'number' && Number.isFinite(rawAdvance) ? Math.max(0, Math.min(3600, rawAdvance)) : 0
+    const schedule = this.getSchedule()
+    const planId = typeof schedule?.planId === 'string' && schedule.planId ? schedule.planId : 'legacy'
+    // Yesterday covers the 90s grace window; tomorrow covers advance across midnight.
+    for (const offset of [-1, 0, 1]) {
+      const events = occurrences(schedule, offsetDate(now, offset))
+      for (let i = 0; i < events.length; i++) {
+        const { item: it, start, dateKey } = events[i]
+        if (it.remind === false) continue
+        const fireAt = start - advance * 1000
+        const id = typeof it.id === 'string' && it.id ? it.id : `${it.start}-${typeof it.title === 'string' ? it.title : ''}`
+        const guard = JSON.stringify([dateKey, planId, id])
+        if (nowMs < fireAt || nowMs - fireAt >= 90000 || this.fired.has(guard)) continue
+        this.fired.add(guard)
+        const next = events[i + 1]?.item
         this.emit({
-          kind: 'event',
-          id,
-          title: it.title || '学习任务',
-          body: it.note || '',
-          subject: it.subject || '',
-          type: it.kind || 'study',
-          start: it.start,
-          end: it.end || '',
+          kind: 'event', id,
+          title: typeof it.title === 'string' && it.title ? it.title : '学习任务',
+          body: typeof it.note === 'string' ? it.note : '',
+          subject: typeof it.subject === 'string' ? it.subject : '',
+          type: typeof it.kind === 'string' ? it.kind : 'study',
+          start: it.start, end: it.end || '',
           next: next ? { title: next.title, start: next.start } : null,
           at: now.toISOString(),
         })
@@ -186,11 +182,7 @@ class Planner {
 
   emit(payload) {
     this.lastPayload = payload
-    try {
-      this.onFire(payload)
-    } catch (e) {
-      // never let a renderer/notification failure kill the scheduler
-    }
+    try { this.onFire(payload) } catch (_) { /* Notification failures must not kill scheduling. */ }
   }
 }
 

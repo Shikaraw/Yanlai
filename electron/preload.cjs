@@ -11,6 +11,13 @@ function on(channel, handler) {
 }
 
 contextBridge.exposeInMainWorld('yanlai', {
+  calculator: {
+    status: () => invoke('calculator:status'),
+    ready: () => invoke('calculator:ready'),
+    calculate: (request) => invoke('calculator:calculate', request),
+    cancel: (id) => invoke('calculator:cancel', id),
+    restart: () => invoke('calculator:restart'),
+  },
   app: {
     info: () => invoke('app:info'),
     setLoginItem: (v) => invoke('app:setLoginItem', v),
@@ -24,6 +31,8 @@ contextBridge.exposeInMainWorld('yanlai', {
     hide: () => invoke('window:hide'),
     setAlwaysOnTop: (v) => invoke('window:setAlwaysOnTop', v),
     onMaximizeChange: (cb) => on('window:maximizeChange', cb),
+    getFocusState: () => invoke('window:getFocusState'),
+    onFocusState: (cb) => on('window:focusState', cb),
   },
   settings: {
     get: () => invoke('settings:get'),
@@ -96,6 +105,10 @@ contextBridge.exposeInMainWorld('yanlai', {
   planner: {
     getSchedule: () => invoke('planner:getSchedule'),
     setSchedule: (d) => invoke('planner:setSchedule', d),
+    listPlans: () => invoke('planner:listPlans'),
+    savePlan: (p) => invoke('planner:savePlan', p),
+    activatePlan: (id) => invoke('planner:activatePlan', id),
+    deletePlan: (id) => invoke('planner:deletePlan', id),
     status: () => invoke('planner:status'),
     pause: (v) => invoke('planner:pause', v),
     preview: (dayOffset) => invoke('planner:preview', dayOffset),

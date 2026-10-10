@@ -636,7 +636,7 @@ const addFlashcardTool: ToolDef = {
 const savePlanTool: ToolDef = {
   name: 'save_study_plan',
   description:
-    '把学习计划写入时间规划模块，学生可在规划页查看并按时收到提醒。mode=unified 每日统一作息；mode=workday 工作日/休息日分开；mode=weekly 按周一到周日分别设置。',
+    '把学习计划以新命名方案保存到时间规划方案库，不覆盖或切换当前计划。学生需在规划页手动启用后才会收到提醒。mode=unified 每日统一作息；mode=workday 工作日/休息日分开；mode=weekly 按周一到周日分别设置。',
   parameters: {
     type: 'object',
     properties: {
@@ -690,7 +690,7 @@ const savePlanTool: ToolDef = {
       weekly: Object.fromEntries(Object.entries(args.weeklyItems || {}).map(([k, v]) => [k, norm(v as any[])])),
       workdays: (args.workdays || [1, 2, 3, 4, 5]).map((n: any) => num(n, 1)),
       activeDays: [1, 2, 3, 4, 5, 6, 7],
-      name: args.name || '研来生成的学习计划',
+      name: String(args.name || '').trim() || '研来生成的学习计划',
       updatedAt: Date.now(),
     }
     await ctx.savePlan(schedule)
@@ -701,8 +701,8 @@ const savePlanTool: ToolDef = {
           ? schedule.workday.work.length + schedule.workday.rest.length
           : Object.values(schedule.weekly).reduce((n, v) => n + (v?.length || 0), 0)
     return {
-      label: '计划已写入',
-      text: `学习计划已写入时间规划模块：模式「${mode === 'unified' ? '每日统一作息' : mode === 'workday' ? '工作日/休息日分开' : '按周规划'}」，共 ${count} 个时段，到时提醒${args.notify === false ? '已关闭' : '已开启'}。学生可点击左侧「时间规划」查看和微调。请简要概括计划结构与执行要点，不要逐条罗列所有时段。`,
+      label: '计划已存入方案库',
+      text: `学习计划「${schedule.name}」已作为新方案保存到时间规划方案库：模式「${mode === 'unified' ? '每日统一作息' : mode === 'workday' ? '工作日/休息日分开' : '按周规划'}」，共 ${count} 个时段。当前启用的计划保持不变，新方案尚未启用，也不会自动触发提醒。学生可点击左侧「时间规划」选择此方案，微调并手动启用；提醒是否开启以应用设置为准。请简要概括计划结构与执行要点，不要逐条罗列所有时段。`,
     }
   },
 }

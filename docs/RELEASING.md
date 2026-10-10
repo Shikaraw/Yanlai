@@ -6,7 +6,7 @@
 
 ## 为什么不能在本机发布
 
-开发机处于受限网络，实测结论如下：
+开发机此前处于受限网络，历史实测结论如下（2026-10-10 发布执行时，正常 SSH 与无鉴权 GitHub API 读取已连通；认证发布仍由 Actions 完成）：
 
 | 通道 | 结果 |
 |---|---|
@@ -37,6 +37,13 @@ curl -s -H "Authorization: Bearer ghp_totallyFake000" \
 
 ## 发布步骤
 
+### v2.0.00 当前准备状态（2026-10-10）
+
+- 用户明确确认拥有尚未公开发布的 CleverCalculator，并授权公开发布集成后的源码与二进制：**发布批准与源码再分发门禁已解决**。原始源码未附独立许可证，不为 CleverCalculator 新设 MIT 许可证；CPython/SymPy/mpmath 等第三方许可证与 notices 保留并继续适用。
+- 已执行既有 `npm run version:bump major`，当前版本 `2.0.00`；同步 package.json、prompt 版本、README 徽章，并单独同步 package-lock 的顶层及根 package 版本（不改依赖解析）。
+- 元数据准备已完成，用户明确授权后续构建、提交、推送、打 tag 与公开发布；正式产物使用 `release/v2.0.00`，不复用或重命名旧检查包。
+- 既有 `1.0.01` 检查包、大小、SHA-256 及测试结果属于历史快照，不是 `2.0.00` 发布产物。未覆盖验收项见 [V2-VERIFICATION.md](V2-VERIFICATION.md)，授权不等于全部技术验收完成。
+
 ### 1. 更新版本号
 
 ```bash
@@ -45,7 +52,7 @@ npm run version:bump minor   # 1.0.05 → 1.1.00   大改动
 npm run version:bump major   # 1.4.02 → 2.0.00   重大改动
 ```
 
-脚本会同步 `package.json`、`src/lib/prompts.ts`、`README.md`。
+脚本会同步 `package.json`、`src/lib/prompts.ts`、`README.md`。还需同步 `package-lock.json` 顶层 `version` 与 `packages[""].version`；仅升版时保持依赖版本、解析 URL 与 integrity 不变。
 
 ### 2. 更新 CHANGELOG
 
@@ -62,9 +69,14 @@ npm run build
 ### 4. 提交并打 tag
 
 ```bash
-git add -A
-git commit -m "发布 v1.0.01：<一句话说明>"
-git tag -a v1.0.01 -m "研来 v1.0.01"
+# 先创建发布分支；仅暂存经审查的应用/运行时/版本文档文件。
+# 不要 git add -A：排除 .zcode、个人数据、学习资料压缩包及本地检查产物。
+git switch -c release/v2.0.00
+git diff --cached --check
+git commit -m "发布 v2.0.00：专注监测、计划库与本地计算器"
+git switch main
+git merge --ff-only release/v2.0.00
+git tag -a v2.0.00 -m "研来 v2.0.00"
 ```
 
 > tag 名必须是 `v` + `package.json` 里的版本号。
@@ -72,15 +84,15 @@ git tag -a v1.0.01 -m "研来 v1.0.01"
 
 ### 5. 推送
 
-网络不稳定，用仓库里的重试包装脚本：
+优先使用正常 SSH 路由与已验证主机密钥，先检查远端不存在同名 tag，禁止 force push：
 
 ```bash
-./scripts/git-retry.sh push origin main
-./scripts/git-retry.sh push origin v1.0.01
+git ls-remote origin refs/tags/v2.0.00
+git push origin main
+git push origin v2.0.00
 ```
 
-脚本会自动在 `ssh.github.com:443` 与 `github.com:22` 之间切换并重试
-（实测 443 端口成功率更高）。
+既有 `git-retry.sh` 会关闭主机密钥验证，不用于正式发布。公共代理仅可用于无鉴权公开读取，不能承载认证写入。
 
 ### 6. 等待 Actions 自动发布
 

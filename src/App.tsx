@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import { useApp, type ViewId } from './store/useApp'
 import { useData } from './store/useData'
 import { useChat, sessionListSorted } from './store/useChat'
@@ -15,9 +15,12 @@ import { SettingsView } from './views/SettingsView'
 import { PreviewPanel, type PreviewTarget } from './views/PreviewPanel'
 import { UpdatePrompt } from './views/UpdatePanel'
 import { bridge, isElectron } from './lib/bridge'
+import { startFocusMonitoring, useFocus } from './store/useFocus'
 import { speech } from './lib/tts'
 import { clsx, relativeTime } from './lib/util'
 import type { Artifact } from './lib/types'
+
+const CalculatorView = lazy(() => import('./views/CalculatorView'))
 
 const NAV: Array<{ id: ViewId; label: string; icon: keyof typeof Icon }> = [
   { id: 'chat', label: '对话工作台', icon: 'chat' },
@@ -27,6 +30,7 @@ const NAV: Array<{ id: ViewId; label: string; icon: keyof typeof Icon }> = [
   { id: 'knowledge', label: '知识库', icon: 'database' },
   { id: 'dashboard', label: '学习统计', icon: 'chart' },
   { id: 'workspace', label: '工作区', icon: 'folder' },
+  { id: 'calculator', label: '数学计算器', icon: 'grid' },
 ]
 
 export function App() {
@@ -35,6 +39,7 @@ export function App() {
   const chat = useChat()
   const [preview, setPreview] = useState<PreviewTarget | null>(null)
   const [booted, setBooted] = useState(false)
+  const [calculatorOpen, setCalculatorOpen] = useState(false)
 
   /* ---------------- TTS failure surfaced as a toast ---------------- */
   useEffect(() => {
@@ -62,6 +67,12 @@ export function App() {
       cancelled = true
     }
   }, [])
+
+  /* ---------------- focus monitoring ---------------- */
+  useEffect(() => {
+    if (!booted) return
+    return startFocusMonitoring()
+  }, [booted])
 
   /* ---------------- planner status polling ---------------- */
   useEffect(() => {
@@ -237,7 +248,7 @@ export function App() {
 
   return (
     <div className="app">
-      <Sidebar badges={badges} />
+      <Sidebar badges={badges} onCalculator={() => setCalculatorOpen((open) => !open)} />
       <div className="main-col">
         <TitleBar />
         {app.view === 'chat' ? (
@@ -259,10 +270,15 @@ export function App() {
           <DashboardView />
         ) : app.view === 'workspace' ? (
           <WorkspaceView />
+        ) : app.view === 'calculator' ? (
+          <Suspense fallback={<div className="panel-body muted">正在加载计算器…</div>}><CalculatorView /></Suspense>
         ) : app.view === 'settings' ? (
           <SettingsView />
         ) : null}
       </div>
+      {calculatorOpen && app.view !== 'calculator' ? <aside className="calculator-sidebar" aria-label="数学计算器侧栏">
+        <Suspense fallback={<div className="panel-body muted">正在加载计算器…</div>}><CalculatorView compact onClose={() => setCalculatorOpen(false)} onExpand={() => { setCalculatorOpen(false); app.setView('calculator') }} /></Suspense>
+      </aside> : null}
 
       <Toasts toasts={app.toasts} onDismiss={app.dismissToast} />
       <ConfirmDialog />
@@ -275,9 +291,11 @@ export function App() {
 /* ------------------------------------------------------------------ */
 /* sidebar                                                            */
 /* ------------------------------------------------------------------ */
-function Sidebar({ badges }: { badges: Partial<Record<ViewId, number>> }) {
+function Sidebar({ badges, onCalculator }: { badges: Partial<Record<ViewId, number>>; onCalculator: () => void }) {
   const app = useApp()
   const chat = useChat()
+  const monitoring = useFocus((state) => state.enabled)
+  const tracking = useFocus((state) => state.tracking)
   const [search, setSearch] = useState('')
   const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null)
 
@@ -311,7 +329,7 @@ function Sidebar({ badges }: { badges: Partial<Record<ViewId, number>> }) {
           const I = Icon[n.icon]
           const badge = badges[n.id]
           return (
-            <button key={n.id} className={clsx('nav-item', app.view === n.id && 'active')} onClick={() => app.setView(n.id)} title={collapsed ? n.label : undefined}>
+            <button key={n.id} className={clsx('nav-item', app.view === n.id && 'active')} onClick={() => n.id === 'calculator' ? onCalculator() : app.setView(n.id)} title={collapsed ? n.label : undefined}>
               <span className="nav-icon">
                 <I size={17} />
               </span>
@@ -321,6 +339,9 @@ function Sidebar({ badges }: { badges: Partial<Record<ViewId, number>> }) {
           )
         })}
       </nav>
+      {monitoring ? <button className="btn ghost sm" style={{ margin: '0 8px 8px', fontSize: 11 }} onClick={() => app.setView('dashboard')} title="仅学习和复习时段监测研来窗口状态">
+        <Icon.chart size={13} />{collapsed ? '' : tracking ? '学习监测中' : '监测已启用 · 等待学习时段'}
+      </button> : null}
 
       <div className="sidebar-section-title">
         <span>对话记录</span>
@@ -600,6 +621,7 @@ function CommandPalette() {
       { label: '切换到 知识库', hint: 'Ctrl+K', icon: 'database', run: () => app.setView('knowledge') },
       { label: '切换到 学习统计', icon: 'chart', run: () => app.setView('dashboard') },
       { label: '切换到 工作区', icon: 'folder', run: () => app.setView('workspace') },
+      { label: '切换到 数学计算器', icon: 'grid', run: () => app.setView('calculator') },
       { label: '打开设置 · 模型与 API', icon: 'cpu', run: () => app.setView('settings', 'model') },
       { label: '打开设置 · 朗读', icon: 'volume', run: () => app.setView('settings', 'tts') },
       { label: '打开设置 · 省 token', icon: 'zap', run: () => app.setView('settings', 'tokens') },

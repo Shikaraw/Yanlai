@@ -10,7 +10,7 @@
 import { REASON_CATEGORIES } from './types'
 
 export const APP_NAME = '研来'
-export const APP_VERSION = '1.0.01'
+export const APP_VERSION = '2.0.00'
 
 export const SUBJECTS = [
   '政治',

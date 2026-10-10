@@ -587,9 +587,8 @@ function makeToolContext() {
     saveKnowledgeNote: (name: string, text: string, tags?: string[], subject?: string) =>
       useData.getState().importText(name, text, { tags, subject, type: 'manual' }),
     savePlan: async (schedule: any) => {
-      await bridge.planner.setSchedule(schedule)
-      const status = await bridge.planner.status().catch(() => null)
-      if (status) useApp.getState().setPlannerStatus(status)
+      const result = await bridge.planner.savePlan({ name: schedule.name, schedule })
+      if (!result?.ok) throw new Error(result?.error || '计划保存失败')
     },
     exportDoc: async ({ format, title, markdown, rows }: any) => {
       void rows

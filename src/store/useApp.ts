@@ -11,6 +11,7 @@ export type ViewId =
   | 'knowledge'
   | 'dashboard'
   | 'workspace'
+  | 'calculator'
   | 'settings'
   | 'about'
 

@@ -21,6 +21,7 @@
 - [Agent 循环](#agent-循环)
 - [提示词架构](#提示词架构)
 - [时间规划调度器](#时间规划调度器)
+- [v2 候选：方案库、专注监测与计算器](#v2-候选方案库专注监测与计算器)
 - [朗读队列](#朗读队列)
 - [文档导出管线](#文档导出管线)
 - [测试策略](#测试策略)
@@ -45,6 +46,7 @@
 │  main.cjs    窗口 / 托盘 / 防多开 / IPC / 菜单             │
 │  lib/        store(原子IO) settings planner(调度)          │
 │              docs(docx/pdf) tts(SAPI) tray updater        │
+│              calculator(受限 Python worker 生命周期)       │
 ├──────────────────────────────────────────────────────────┤
 │ 外部：LLM API · TTS API · GitHub Releases（检查更新）      │
 └──────────────────────────────────────────────────────────┘
@@ -96,6 +98,7 @@ electron/                 主进程
     store.cjs             原子读写（tmp+rename）、目录管理
     settings.cjs          默认值 + 深合并
     planner.cjs           时间规划调度器（常驻主进程，托盘下仍工作）
+    calculator.cjs         受限的嵌入 Python 计算器 worker 管理器
     docs.cjs              Markdown → DOCX / PDF / HTML
     tts.cjs               Windows SAPI / macOS say 语音合成
     tray.cjs              系统托盘与菜单
@@ -117,14 +120,17 @@ src/
   store/                  useApp / useChat / useData
   components/             Icons / Markdown / MessageBubble / ui
   views/                  各页面 + ReminderApp（独立窗口）+ UpdatePanel
+                          + CalculatorView（侧栏 / 主区域复用）
   styles/app.css          设计系统（CSS 变量驱动主题与强调色）
 scripts/
   make-icons.mjs          SVG → PNG / ICO（Electron 渲染 + Pillow 降采样）
   bump-version.mjs        版本号管理
   dist.mjs                打包入口（注入 APP_VERSION 绕过 semver 规范化）
   mock-server.mjs         本地 mock LLM 服务
+  calculator/             计算器运行时准备与 manifest 校验
   git-retry.sh            不稳定网络下的 git 重试包装
-tests/                    4 组测试套件 + 运行器
+resources/clever-calculator/  计算器 worker、引擎与 Windows x64 嵌入运行时
+tests/                    逻辑 / Electron 套件 + 运行器
 ```
 
 ---
@@ -393,7 +399,9 @@ resolveDayItems(schedule, date)
   unified → activeDays.includes(dow) ? unified : []
 ```
 
-**防重复提醒**：以 `${dateKey}:${itemId}` 为键记录已触发，跨天自动清空。
+**防重复提醒（v2 候选）**：以 JSON 编码的 `[发生日期, planId, itemId]` 为键记录已触发。同名方案仍有独立身份；保存或重新启用不会清空已触发状态，跨天清理时保留昨天的 guard，以覆盖午夜后的宽限窗口。
+
+调度采用本地日历日期：结束时间早于开始时间表示次日结束，状态可解析昨天开始的跨夜时段；提醒扫描昨天、今天、明天，覆盖跨午夜提前提醒。`activeDays` 仅控制统一模式，按周/工作日模式独立路由。
 
 **防「补课式轰炸」**：只在目标时间点后的 **90 秒窗口内**触发。
 如果应用关闭了两小时后重开，不会把错过的提醒全部弹出来：
@@ -404,6 +412,50 @@ if (nowMs >= fireAt && nowMs - fireAt < 90000 && !this.fired.has(gk)) { ... }
 
 `snooze`（稍后再说）单独存队列，**不受暂停状态影响**——用户明确要求延后提醒时，
 暂停开关不应把它一起静音。
+
+---
+
+## v2 候选：方案库、专注监测与计算器
+
+本节描述 v2 功能工作树；当前包版本已更新为 `2.0.00`，用户明确授权公开发布集成源码与二进制，发布批准与 CleverCalculator 源码再分发门禁已解决。正式构建输出到 `release/v2.0.00`，公开发布由同名 tag 的 GitHub Actions 执行。以下构建与验收记录为升版前历史快照，最新验证见 [V2-VERIFICATION.md](V2-VERIFICATION.md)。
+
+### 方案库与身份
+
+`electron/main.cjs` 的 planner IPC 在本机 `planner-plans.json` 保存命名方案库，`planner.json` 保存当前启用方案。旧单计划迁移时保留内容、生成稳定身份，活动方案保存会同步两份文件。写入失败返回错误，并尝试回滚方案库；过期编辑器的 `planId` 不得覆盖另一个已启用方案。
+
+支持新建、复制/另存为、保存名称、启用与删除，至少保留一个方案。AI 的 `save_study_plan` 经 `useChat` 调用 `savePlan`，不带旧方案 id，始终生成未启用草稿（包括第一个 AI 方案），不改当前计划、不启动提醒；用户手动选用才启用。GUI 的另存为会建立并启用独立副本。
+
+GUI 另存为建立并启用独立副本；工作/休息场景互拷生成独立时段 id、保留名称且不改源场景。模板和场景复制必须等待持久化成功才显示成功反馈。实际编辑器以明确的 `isNew` 字段区分新建与编辑，不用不可靠的 id 推断新建身份。
+
+### 默认关闭的专注监测
+
+`src/lib/focus.ts` 提供可注入时钟的纯累加器，`src/store/useFocus.ts` 在 App 生命周期中管理显式 opt-in。默认 `enabled: false`；关闭时不安装专注窗口监听器、不轮询监测用计划。只统计当前方案的 `study` / `review` 有效区间，支持跨午夜；其他类型排除，重叠区间不重复计时，提醒暂停不影响独立监测开关。
+
+主进程只暴露研来主窗口的 focused/visible/minimized 状态，不读取其他应用内容。前台、可见且未最小化才算窗口内；一次正时长窗口内片段的退出计一次切屏。每日保存窗口内/外时长、切屏数与已结束片段时长，平均专注仅使用已结束片段。日界按本地午夜拆分；超过 15 秒未观察间隔或时钟回退会丢弃间隔并截断未完成片段，重载不回放停机时间。
+
+IndexedDB `kv` 使用 `focus.v1.enabled` 和 `focus.v1.aggregate`，保留原有 `version: 1`，新增可选 `sessions`，旧版仅 `days` 聚合仍兼容，无需丢弃旧聚合。日聚合最多保留 90 条，session 最多 2000 条且在 90 天内，每条仅有 `{start, end, durationMs, kind, endReason}`；`kind` 是 `focused` / `outOfWindow`，结束原因是 `switch` / `schedule` / `gap` / `stop`。这是窗口状态区间记录，不包含其他应用元数据，不应继续称为「只保存聚合 / 无记录」。UI 保留近 7 天趋势，侧边导航在启用时显示监测状态。
+
+关闭保留既有聚合与区间记录；确认重置清空两者及未完成片段，不改变开关、不清学习打卡。偏好、重置、心跳写入共用队列，防止旧写入覆盖清除结果。窗口状态仅为行为代理，不是实际专注质量判定。历史学习统计的来源/措辞已澄清，新增最新 20 条切屏 session 显示；旧 UTC 日期桶不会迁移或自动重解释为本地日期。
+
+### 实际计算侧栏与受限 worker
+
+`src/views/CalculatorView.tsx` 经 lazy import 复用于右侧计算侧栏和展开后的主区域，并非仅新增导航标签。本地支持微积分、矩阵、微分方程；矩阵结果解析为带行列编号的可滚动表格，同时保留原始文本，多矩阵结果也可分别展示。结果复制/插入对话不自动调用模型。历史仅会话内最多 20 条。
+
+`electron/lib/calculator.cjs` 通过受限 IPC 校验请求，用 `shell: false` 启动嵌入 Python `-I -B -u` worker；JSON 行协议带请求 id，限制输入/输出、一次只处理一个请求，提供启动/计算超时、取消、崩溃错误和重启。不是任意 Python 执行或 OS 沙箱。表达式仍是非可信输入，需要保持 worker 的受限解析边界。
+
+Windows x64 资源位于 `resources/clever-calculator`：CPython **3.13.12**、SymPy **1.14.0**、mpmath **1.3.0**；不含 Qt、numpy、matplotlib，不依赖用户系统 Python。`scripts/calculator/prepare_runtime.py` 使用固定版本与下载哈希，保留依赖许可证、剔除依赖测试/缓存，禁用 site。`verify-runtime.cjs` 校验 manifest 的逐文件 SHA-256/大小和额外文件，作为 `beforePack` 钩子；`extraResources` 放到包外资源目录供 worker 使用。其他平台的等效运行时未在本候选验证。
+
+资源含 manifest 共 **39,772,854 字节，约 37.93 MiB**；ZIP 估计 **15,580,570 字节，约 14.86 MiB**，**不是安装包大小**。原始 CleverCalculator 源码未附独立许可证；权利人已明确确认所有权并授权公开发布集成源码与二进制，源码再分发门禁已解决，不新设 MIT 许可证，第三方许可证与 notices 保留。上述含 manifest 体积与 ZIP 估计为授权元数据修改前历史值；当前资源校验及并行 worker 元数据更新见 [V2-VERIFICATION.md](V2-VERIFICATION.md)。
+
+### 验证边界
+
+最终 `npm test`、`npm run typecheck`、`npm run build` 与 **`release/v2-inspection-ready`** portable 构建均通过，退出码 0，包含最终仪表盘修订。资源校验已通过；ready 文件 `Yanlai-1.0.01-inspection-Portable-x64.exe` 为 **117,525,049 字节（112.08 MiB / 117.53 MB）**，SHA-256 见 [验证记录](V2-VERIFICATION.md)。这仅确认自动化与构建，不等于全部桌面门禁完成。
+
+**浏览器 GUI**：标题栏/透明侧栏视觉复测、六目标复制与另存为检查通过。**隔离开发版 Electron**：主区域/侧栏操作及真实内置 Python 积分 `x²`（0 到 1）→ `1/3`、逆矩阵 `[[1,2],[3,4]]` → `[[-2,1],[3/2,-1/2]]` 已验证，重启后观察到「Python已就绪」。**最终 ready portable EXE 尚未实际启动验证**，不可把开发版观察当作最终包运行验收。LockApp 前台限制真实焦点测试；前台/失焦/最小化/托盘转换与 NSIS 实装门禁仍未完成，不解锁用户机器，不宣称全部桌面验收通过。
+
+`YANLAI_INSPECTION_PROFILE` 仅接受绝对目录，在单实例锁前设置 `userData`，不是 OS 沙箱。推荐[独立检查启动器](../release/v2-inspection-ready/启动独立检查版.cmd)，它设置 `YANLAI_INSPECTION_PROFILE=%~dp0inspection-user-data`；**直接启动 EXE 默认使用个人数据目录**。先阅读[检查说明](../release/v2-inspection-ready/检查说明.md)。
+
+旧输出 `EPERM` 经使用已有 Electron runtime 重试生成 unpacked 目录（`du` 513M）后解决该次阻断，不能断言杀毒软件是原因。较早 **117,523,250 字节**portable 及 complete/final 产物已被 ready 取代，不代表最终文件或体积。当时包版本为 `1.0.01`，未发布；当前正式版本为 `2.0.00`，正式产物验证见验证记录。
 
 ---
 
@@ -473,6 +525,10 @@ if (nowMs >= fireAt && nowMs - fireAt < 90000 && !this.fired.has(gk)) { ... }
 | `export` | electron | DOCX/PDF/HTML 实际产物校验 |
 | `tts` | electron | SAPI 音色列表、WAV 头、语速影响 |
 | `updater` | electron | 版本比较、镜像回退、连通性 |
+| `planner` / `planner-scheduler` | node | 时间解析、模式执行日、跨午夜状态/提前提醒、身份防重 |
+| `plan-library` | node | 方案迁移、激活/删除/写入失败、AI 未启用草稿 |
+| `focus` | node | 学习/复习限定、日聚合、失焦/休眠/重载、默认关闭与重置生命周期 |
+| `calculator` | node | worker 协议、生命周期、错误边界与真实本地计算 |
 
 **测试哲学**：断言**行为**而非实现。例如不检查「是否调用了某个内部函数」，
 而是检查「解压出的 docx 里有没有这段中文」。

@@ -59,15 +59,17 @@ jobs:
           echo "版本号: $V"
 
       - name: 校验 tag 与 package.json 版本
-        if: startsWith(github.ref, 'refs/tags/')
         shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          TAG="${GITHUB_REF#refs/tags/v}"
-          A=$(echo "$TAG" | sed 's/\.0*\([0-9]\)/.\1/g')
-          B=$(echo "${{ steps.ver.outputs.version }}" | sed 's/\.0*\([0-9]\)/.\1/g')
-          if [ "$A" != "$B" ]; then
-            echo "::warning::tag ($TAG) 与 package.json (${{ steps.ver.outputs.version }}) 不一致，以 package.json 为准"
+          set -euo pipefail
+          EXPECTED="v${{ steps.ver.outputs.version }}"
+          if [ "$RELEASE_TAG" != "$EXPECTED" ]; then
+            echo "::error::tag ($RELEASE_TAG) 必须严格匹配 package.json ($EXPECTED)"
+            exit 1
           fi
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
 
       - name: 安装依赖
         run: npm ci --no-audit --no-fund
@@ -94,12 +96,11 @@ jobs:
       - name: 确认产物
         shell: bash
         run: |
-          ls -la release/ | grep -i '\.exe$'
-          COUNT=$(ls release/*.exe 2>/dev/null | wc -l)
-          if [ "$COUNT" -lt 1 ]; then
-            echo "::error::没有找到任何 .exe 产物"
-            exit 1
-          fi
+          set -euo pipefail
+          V="${{ steps.ver.outputs.version }}"
+          test -s "release/Yanlai-${V}-Setup-x64.exe"
+          test -s "release/Yanlai-${V}-Portable-x64.exe"
+          sha256sum "release/Yanlai-${V}-Setup-x64.exe" "release/Yanlai-${V}-Portable-x64.exe"
 
       # gh CLI is preinstalled on GitHub runners and handles asset upload far
       # more robustly than the third-party release action (which failed on the
@@ -114,6 +115,14 @@ jobs:
           V="${{ steps.ver.outputs.version }}"
           NOTES=$(cat <<EOF
           ## 研来 v${V}
+
+          ### v2 新功能
+
+          - 仪表盘专注监测与切屏记录，支持本地日期统计和学习状态恢复。
+          - 多方案计划库与跨夜学习调度；支持场景复制、提醒暂停与持久化。
+          - CleverCalculator 本地符号计算：表达式、微积分、矩阵与微分方程，无需网络或系统 Python。
+          - 完整键盘输入、条件区、结果复制到对话与本次会话历史。
+          - 项目所有者已授权 CleverCalculator 集成源码与程序公开发布；未推定 MIT 或其他宽松项目许可，第三方许可与声明保留。
 
           ### 下载
 
@@ -136,19 +145,23 @@ jobs:
           EOF
           )
 
-          # 若已存在同名 Release（例如重跑），先删除再重建，保证资产完整
+          # Never delete or overwrite an existing public release or asset on rerun.
+          # Add only missing assets so a partial upload can be recovered safely.
           if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "Release $TAG 已存在，先删除以保证资产完整"
-            gh release delete "$TAG" --repo "${{ github.repository }}" --yes
+            for ASSET in "Yanlai-${V}-Setup-x64.exe" "Yanlai-${V}-Portable-x64.exe"; do
+              if ! gh release view "$TAG" --repo "${{ github.repository }}" --json assets --jq '.assets[].name' | grep -Fxq "$ASSET"; then
+                gh release upload "$TAG" "release/$ASSET" --repo "${{ github.repository }}"
+              fi
+            done
+          else
+            gh release create "$TAG" \
+              --repo "${{ github.repository }}" \
+              --title "研来 v${V}" \
+              --notes "$NOTES" \
+              --verify-tag \
+              release/Yanlai-"${V}"-Setup-x64.exe \
+              release/Yanlai-"${V}"-Portable-x64.exe
           fi
-
-          gh release create "$TAG" \
-            --repo "${{ github.repository }}" \
-            --title "研来 v${V}" \
-            --notes "$NOTES" \
-            --verify-tag \
-            release/Yanlai-"${V}"-Setup-x64.exe \
-            release/Yanlai-"${V}"-Portable-x64.exe
 
           echo "已发布 Release $TAG"
 
@@ -157,6 +170,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          V="${{ steps.ver.outputs.version }}"
+          gh release view "$TAG" --repo "${{ github.repository }}" --json tagName,isDraft,assets > release/published.json
+          node -e 'const fs = require("fs"); const r = JSON.parse(fs.readFileSync("release/published.json")); const v = process.argv[1]; if (r.tagName !== `v${v}` || r.isDraft) throw Error("Release is not public or tag differs"); for (const kind of ["Setup", "Portable"]) { const name = `Yanlai-${v}-${kind}-x64.exe`; const a = r.assets.find(a => a.name === name); if (!a || a.size <= 0) throw Error(`Missing/empty asset: ${name}`); console.log(`${name}: ${a.size} bytes`); }' "$V"
           gh release view "$TAG" --repo "${{ github.repository }}" --json tagName,name,assets \
             --template '{{.tagName}} | {{.name}}{{"\n"}}{{range .assets}}  asset: {{.name}} ({{.size}} bytes){{"\n"}}{{end}}'

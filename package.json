@@ -1,7 +1,7 @@
 {
   "name": "yanlai",
   "productName": "研来",
-  "version": "1.0.01",
+  "version": "2.0.00",
   "description": "研来 (Yanlai) — 面向考研的学习辅导 AI Agent 桌面应用",
   "main": "electron/main.cjs",
   "author": "Yanlai",
@@ -64,6 +64,16 @@
       "build/tray.png",
       "build/icon.ico",
       "package.json"
+    ],
+    "beforePack": "scripts/calculator/verify-runtime.cjs",
+    "extraResources": [
+      {
+        "from": "resources/clever-calculator",
+        "to": "clever-calculator",
+        "filter": [
+          "**/*"
+        ]
+      }
     ],
     "win": {
       "target": [

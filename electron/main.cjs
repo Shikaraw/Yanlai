@@ -11,6 +11,9 @@ const settingsLib = require('./lib/settings.cjs')
 const docsLib = require('./lib/docs.cjs')
 const ttsLib = require('./lib/tts.cjs')
 const updater = require('./lib/updater.cjs')
+const { CalculatorManager, resolveConfig, failure: calculatorFailure } = require('./lib/calculator.cjs')
+const calculator = new CalculatorManager(resolveConfig({ packaged: app.isPackaged, resourcesPath: process.resourcesPath }))
+app.on('before-quit', () => calculator.dispose())
 const { createTray, refreshTray, destroyTray, iconPath } = require('./lib/tray.cjs')
 const { Planner } = require('./lib/planner.cjs')
 
@@ -49,6 +52,12 @@ function parseCliImport() {
 }
 const cliImport = parseCliImport()
 let cliImportPending = cliImport
+
+const inspectionProfile = process.env.YANLAI_INSPECTION_PROFILE
+if (inspectionProfile) {
+  if (!path.isAbsolute(inspectionProfile)) throw new Error('YANLAI_INSPECTION_PROFILE must be an absolute path')
+  app.setPath('userData', inspectionProfile)
+}
 
 /* ---------------- single instance (防多开) ---------------- */
 const gotLock = app.requestSingleInstanceLock()
@@ -100,6 +109,16 @@ function send(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload)
 }
 
+let focusSequence = 0
+function mainFocusState() {
+  const win = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null
+  return { focused: !!win && win.isFocused(), visible: !!win && win.isVisible(), minimized: !!win && win.isMinimized(), at: Date.now(), sequence: focusSequence }
+}
+function emitMainFocus() {
+  focusSequence++
+  send('window:focusState', mainFocusState())
+}
+
 function applyLoginItem(enabled) {
   try {
     app.setLoginItemSettings({ openAtLogin: !!enabled, openAsHidden: true, args: ['--hidden'] })
@@ -146,6 +165,10 @@ function createMainWindow() {
       webSecurity: true,
     },
   })
+
+  // Only this BrowserWindow is observed; reminder/export windows never publish.
+  for (const event of ['focus', 'blur', 'show', 'hide', 'minimize', 'restore']) mainWindow.on(event, emitMainFocus)
+  mainWindow.webContents.on('did-finish-load', emitMainFocus)
 
   loadRenderer(mainWindow)
 
@@ -315,6 +338,23 @@ function handleTrayAction(action) {
   }
 }
 
+/* ---------------- IPC: calculator (main renderer only) ---------------- */
+const calculatorAllowed = event => !!mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents
+ipcMain.handle('calculator:status', () => calculator.status())
+ipcMain.handle('calculator:ready', async event => {
+  if (!calculatorAllowed(event)) return { ready: false, state: 'stopped', error: 'Calculator access denied' }
+  try { return await calculator.ensureReady() }
+  catch (e) { return { ...calculator.status(), error: e.message } }
+})
+ipcMain.handle('calculator:calculate', (event, payload) => calculatorAllowed(event)
+  ? calculator.calculate(payload) : calculatorFailure(payload?.id || null, 'DENIED', 'Calculator access denied'))
+ipcMain.handle('calculator:cancel', (event, id) => calculatorAllowed(event) && calculator.cancel(id))
+ipcMain.handle('calculator:restart', async event => {
+  if (!calculatorAllowed(event)) return { ready: false, state: 'stopped', error: 'Calculator access denied' }
+  try { return await calculator.restart() }
+  catch (e) { return { ...calculator.status(), error: e.message } }
+})
+
 /* ---------------- IPC: app / window ---------------- */
 ipcMain.handle('app:info', () => ({
   version: app.getVersion(),
@@ -333,6 +373,10 @@ ipcMain.handle('app:setLoginItem', (_e, enabled) => {
   return true
 })
 
+ipcMain.handle('window:getFocusState', (event) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents) return null
+  return mainFocusState()
+})
 ipcMain.handle('window:minimize', () => mainWindow && mainWindow.minimize())
 ipcMain.handle('window:toggleMaximize', () => {
   if (!mainWindow) return false
@@ -929,13 +973,107 @@ ipcMain.handle('update:openRelease', async (_e, { url, useMirror }) => {
 })
 
 /* ---------------- IPC: planner status / schedule ---------------- */
-ipcMain.handle('planner:getSchedule', () => store.readJson(path.join(store.dirs().userData, 'planner.json'), null))
-ipcMain.handle('planner:setSchedule', (_e, data) => {
-  const payload = { ...data, updatedAt: Date.now() }
-  store.writeJson(path.join(store.dirs().userData, 'planner.json'), payload)
-  if (planner) planner.reload()
-  return payload
-})
+function plannerLibraryPath() { return path.join(store.dirs().userData, 'planner-plans.json') }
+function plannerSchedulePath() { return path.join(store.dirs().userData, 'planner.json') }
+function planId() { return `plan_${Date.now().toString(36)}_${crypto.randomBytes(3).toString('hex')}` }
+function persistPlanLibrary(lib, schedule) {
+  const previous = store.readJson(plannerLibraryPath(), null)
+  if (!store.writeJson(plannerLibraryPath(), lib)) return { ok: false, error: '计划库文件写入失败' }
+  if (schedule !== undefined && !store.writeJson(plannerSchedulePath(), schedule)) {
+    let restored = false
+    try {
+      restored = previous !== null ? store.writeJson(plannerLibraryPath(), previous) : (fs.unlinkSync(plannerLibraryPath()), true)
+    } catch {}
+    return { ok: false, error: `计划文件写入失败${restored ? '' : '；计划库回滚失败，请重新选择当前计划'}` }
+  }
+  if (schedule !== undefined && planner) planner.reload()
+  return { ok: true }
+}
+function loadPlanLibrary() {
+  const current = store.readJson(plannerSchedulePath(), null)
+  const saved = store.readJson(plannerLibraryPath(), null)
+  if (saved && Array.isArray(saved.plans)) {
+    const lib = { ...saved, version: 1, plans: saved.plans.map((p) => ({ ...p, schedule: { ...p.schedule, planId: p.id } })) }
+    if (!lib.plans.some((p) => p.id === lib.activeId)) lib.activeId = ''
+    // Older libraries had no schedule identity. Preserve any edits in planner.json.
+    const active = lib.plans.find((p) => p.id === lib.activeId)
+    if (active && current && !current.planId) {
+      active.schedule = { ...current, name: active.name, planId: active.id }
+      const result = persistPlanLibrary(lib, active.schedule)
+      if (!result.ok) throw new Error(result.error)
+    }
+    return lib
+  }
+  if (current) {
+    const id = current.planId || planId()
+    const schedule = { ...current, planId: id }
+    const migrated = { version: 1, activeId: id, plans: [{ id, name: current.name || '默认计划', createdAt: current.updatedAt || Date.now(), updatedAt: current.updatedAt || Date.now(), schedule }] }
+    const result = persistPlanLibrary(migrated, schedule)
+    if (!result.ok) throw new Error(result.error)
+    return migrated
+  }
+  return { version: 1, activeId: '', plans: [] }
+}
+function plannerOperation(fn) {
+  try { return fn() } catch (e) { return { ok: false, error: e?.message || '计划操作失败' } }
+}
+function validPlanSchedule(schedule) { return schedule && typeof schedule === 'object' && !Array.isArray(schedule) }
+ipcMain.handle('planner:listPlans', () => loadPlanLibrary())
+ipcMain.handle('planner:savePlan', (_e, data = {}) => plannerOperation(() => {
+  const { id, name, schedule } = data
+  if (!validPlanSchedule(schedule)) return { ok: false, error: '计划内容无效' }
+  const lib = loadPlanLibrary(); const now = Date.now()
+  const idx = lib.plans.findIndex((p) => p.id === id)
+  if (id && idx < 0) return { ok: false, error: '计划不存在' }
+  const newId = idx >= 0 ? id : planId()
+  const planName = String(name || schedule.name || '未命名计划').trim() || '未命名计划'
+  const plan = { id: newId, name: planName, createdAt: idx >= 0 ? lib.plans[idx].createdAt : now, updatedAt: now, schedule: { ...schedule, planId: newId, name: planName, updatedAt: now } }
+  if (idx >= 0) lib.plans[idx] = plan; else lib.plans.push(plan)
+  // New plans are drafts until explicitly activated, including the first AI plan.
+  const activeSchedule = lib.activeId === plan.id ? plan.schedule : undefined
+  const result = persistPlanLibrary(lib, activeSchedule)
+  if (!result.ok) return result
+  return { ok: true, plan, library: lib }
+}))
+ipcMain.handle('planner:activatePlan', (_e, id) => plannerOperation(() => {
+  const lib = loadPlanLibrary(); const p = lib.plans.find((x) => x.id === id)
+  if (!p) return { ok: false, error: '计划不存在' }
+  lib.activeId = id
+  const result = persistPlanLibrary(lib, p.schedule)
+  if (!result.ok) return result
+  return { ok: true, library: lib, schedule: p.schedule }
+}))
+ipcMain.handle('planner:deletePlan', (_e, id) => plannerOperation(() => {
+  const lib = loadPlanLibrary()
+  if (!lib.plans.some((p) => p.id === id)) return { ok: false, error: '计划不存在' }
+  if (lib.plans.length <= 1) return { ok: false, error: '至少保留一个计划' }
+  const deletingActive = lib.activeId === id
+  lib.plans = lib.plans.filter((p) => p.id !== id)
+  if (deletingActive) lib.activeId = lib.plans[0].id
+  const schedule = deletingActive ? lib.plans[0].schedule : undefined
+  const result = persistPlanLibrary(lib, schedule)
+  if (!result.ok) return result
+  return { ok: true, library: lib, ...(schedule ? { schedule } : {}) }
+}))
+ipcMain.handle('planner:getSchedule', () => { loadPlanLibrary(); return store.readJson(plannerSchedulePath(), null) })
+ipcMain.handle('planner:setSchedule', (_e, data) => plannerOperation(() => {
+  if (!validPlanSchedule(data)) return { ok: false, error: '计划内容无效' }
+  const lib = loadPlanLibrary()
+  const active = lib.plans.find((p) => p.id === lib.activeId)
+  // A stale editor must not overwrite a plan activated in another view.
+  if (data.planId && data.planId !== lib.activeId) return { ok: false, error: '当前计划已切换，请重新加载后保存' }
+  const now = Date.now(); const id = active ? active.id : planId()
+  const name = String(data.name || active?.name || '未命名计划').trim() || '未命名计划'
+  const payload = { ...data, planId: id, name, updatedAt: now }
+  if (active) Object.assign(active, { name, schedule: payload, updatedAt: now })
+  else {
+    lib.activeId = id
+    lib.plans.push({ id, name, createdAt: now, updatedAt: now, schedule: payload })
+  }
+  const result = persistPlanLibrary(lib, payload)
+  if (!result.ok) return result
+  return { ok: true, schedule: payload, library: lib }
+}))
 ipcMain.handle('planner:status', () => (planner ? planner.status() : null))
 ipcMain.handle('planner:pause', (_e, paused) => {
   if (planner) planner.setPaused(!!paused)
